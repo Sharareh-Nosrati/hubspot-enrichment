@@ -29,6 +29,11 @@ SLEEP_BETWEEN_RECORDS = float(os.getenv("REQUEST_DELAY", "1"))
 
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "")
 
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
+
+_gspread_client = None
+_worksheet = None
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
@@ -69,17 +74,20 @@ def hs_headers() -> Dict[str, str]:
     }
 
 
-def get_worksheet():
+def get_gspread_client():
+    global _gspread_client
+
+    if _gspread_client is not None:
+        return _gspread_client
+
     google_service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
     print("DEBUG GOOGLE_SERVICE_ACCOUNT_JSON exists:", bool(google_service_account_json))
     print("DEBUG GOOGLE_SHEET_NAME:", repr(GOOGLE_SHEET_NAME))
+    print("DEBUG GOOGLE_SHEET_ID:", repr(GOOGLE_SHEET_ID))
 
     if not google_service_account_json:
         raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON is missing.")
-
-    if not GOOGLE_SHEET_NAME:
-        raise ValueError("GOOGLE_SHEET_NAME is missing.")
 
     try:
         service_account_info = json.loads(google_service_account_json)
@@ -91,8 +99,25 @@ def get_worksheet():
         scopes=SCOPES
     )
 
-    client = gspread.authorize(creds)
-    sheet = client.open(GOOGLE_SHEET_NAME)
+    _gspread_client = gspread.authorize(creds)
+    return _gspread_client
+
+
+def get_worksheet():
+    global _worksheet
+
+    if _worksheet is not None:
+        return _worksheet
+
+    client = get_gspread_client()
+
+    if GOOGLE_SHEET_ID:
+        sheet = client.open_by_key(GOOGLE_SHEET_ID)
+    elif GOOGLE_SHEET_NAME:
+        sheet = client.open(GOOGLE_SHEET_NAME)
+    else:
+        raise ValueError("Either GOOGLE_SHEET_ID or GOOGLE_SHEET_NAME must be set.")
+
     ws = sheet.sheet1
 
     existing_headers = ws.row_values(1)
@@ -102,8 +127,13 @@ def get_worksheet():
     elif existing_headers != HEADERS:
         ws.update("A1:V1", [HEADERS])
 
-    return ws
+    _worksheet = ws
+    return _worksheet
 
+
+def get_existing_company_ids(ws) -> set[str]:
+    values = ws.col_values(1)
+    return {v for v in values[1:] if v}
 
 def find_row_by_company_id(ws, company_id: str):
     if ws is None:
@@ -116,11 +146,8 @@ def find_row_by_company_id(ws, company_id: str):
     return None
 
 
-def already_processed(company_id: str) -> bool:
-    ws = get_worksheet()
-    if ws is None:
-        raise ValueError("Worksheet could not be loaded.")
-    return find_row_by_company_id(ws, str(company_id)) is not None
+def already_processed(existing_ids: set[str], company_id: str) -> bool:
+    return str(company_id) in existing_ids
 
 
 def hubspot_get_signed_file_url(file_id: str) -> Optional[str]:
@@ -139,6 +166,7 @@ def hubspot_get_signed_file_url(file_id: str) -> Optional[str]:
 
 
 def upsert_company_result(
+    ws,
     company_id: str,
     name: str,
     city: str,
@@ -150,10 +178,7 @@ def upsert_company_result(
     needs_review_override: str = "",
     evidence_override: str = ""
 ) -> None:
-    ws = get_worksheet()
-
     pdf_cell_value = pdf_url or ""
-
     if result is not None:
         status = "ok"
         evidence_text = result.evidence or ""
@@ -472,7 +497,7 @@ def build_missing_requirements_note(name: str, city: str, country: str) -> str:
     )
 
 
-def process_one_company(company: Dict[str, Any]) -> None:
+def process_one_company(company: Dict[str, Any], ws, existing_ids: set[str]) -> None:
     record_id = company["id"]
     props = company.get("properties", {}) or {}
 
@@ -502,7 +527,7 @@ def process_one_company(company: Dict[str, Any]) -> None:
     print("DEBUG city:", city)
     print("DEBUG country:", country)
 
-    if already_processed(str(record_id)):
+    if already_processed(existing_ids, str(record_id)):
         print(f"Skipping {record_id}: already processed in Google Sheet")
         return
 
@@ -512,6 +537,7 @@ def process_one_company(company: Dict[str, Any]) -> None:
         note_body = build_missing_requirements_note(name, city, country)
 
         upsert_company_result(
+            ws,
             company_id=str(record_id),
             name=name,
             city=city,
@@ -521,6 +547,8 @@ def process_one_company(company: Dict[str, Any]) -> None:
             needs_review_override="true",
             evidence_override="Missing required fields: name and/or city"
         )
+
+        existing_ids.add(str(record_id))
 
         note_id = hubspot_create_note_for_contact(record_id, note_body, attachment_ids=[])
         print(f"Created simple note {note_id} for record {record_id} without PDF")
@@ -551,6 +579,7 @@ def process_one_company(company: Dict[str, Any]) -> None:
         print(f"PDF upload skipped for record {record_id}: {e}")
 
     upsert_company_result(
+        ws,
         company_id=str(record_id),
         name=name,
         city=city,
@@ -559,6 +588,8 @@ def process_one_company(company: Dict[str, Any]) -> None:
         hubspot_file_id=file_id,
         pdf_url=pdf_url or ""
     )
+
+    existing_ids.add(str(record_id))
 
     attachment_ids = [file_id] if file_id else []
     note_id = hubspot_create_note_for_contact(
@@ -572,13 +603,16 @@ def process_one_company(company: Dict[str, Any]) -> None:
 
 
 def run_once(limit: int = POLL_LIMIT) -> None:
+    ws = get_worksheet()
+    existing_ids = get_existing_company_ids(ws)
+
     contacts = hubspot_list_contacts(limit=limit)
     print(f"Found {len(contacts)} records to process.")
 
     for contact in contacts:
         try:
             print(f"Processing record {contact['id']}...")
-            process_one_company(contact)
+            process_one_company(contact, ws, existing_ids)
         except Exception as e:
             print(f"Error processing record {contact.get('id')}: {e}")
             traceback.print_exc()
