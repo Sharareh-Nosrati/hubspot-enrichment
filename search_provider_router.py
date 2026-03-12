@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import requests
 from dotenv import load_dotenv
 
-load_dotenv("openaikey.env")
+load_dotenv()
 
 
 # ============================================================
