@@ -2,6 +2,7 @@ import os
 import time
 import json
 import tempfile
+import traceback
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
@@ -32,7 +33,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
-
 
 HEADERS = [
     "hubspot_company_id",
@@ -72,13 +72,19 @@ def hs_headers() -> Dict[str, str]:
 def get_worksheet():
     google_service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
+    print("DEBUG GOOGLE_SERVICE_ACCOUNT_JSON exists:", bool(google_service_account_json))
+    print("DEBUG GOOGLE_SHEET_NAME:", repr(GOOGLE_SHEET_NAME))
+
     if not google_service_account_json:
         raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON is missing.")
 
     if not GOOGLE_SHEET_NAME:
         raise ValueError("GOOGLE_SHEET_NAME is missing.")
 
-    service_account_info = json.loads(google_service_account_json)
+    try:
+        service_account_info = json.loads(google_service_account_json)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON: {e}")
 
     creds = Credentials.from_service_account_info(
         service_account_info,
@@ -146,7 +152,7 @@ def upsert_company_result(
 ) -> None:
     ws = get_worksheet()
 
-    pdf_cell_value = pdf_url if pdf_url else ""
+    pdf_cell_value = pdf_url or ""
 
     if result is not None:
         status = "ok"
@@ -575,6 +581,7 @@ def run_once(limit: int = POLL_LIMIT) -> None:
             process_one_company(contact)
         except Exception as e:
             print(f"Error processing record {contact.get('id')}: {e}")
+            traceback.print_exc()
         time.sleep(SLEEP_BETWEEN_RECORDS)
 
 
