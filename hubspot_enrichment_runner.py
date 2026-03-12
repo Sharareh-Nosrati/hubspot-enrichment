@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import tempfile
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
@@ -25,13 +26,13 @@ PROP_COUNTRY = "country"
 POLL_LIMIT = int(os.getenv("HUBSPOT_BATCH_LIMIT", "2"))
 SLEEP_BETWEEN_RECORDS = float(os.getenv("REQUEST_DELAY", "1"))
 
-GOOGLE_SHEETS_CREDENTIALS_FILE = os.getenv("GOOGLE_SHEETS_CREDENTIALS_FILE", "")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "")
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
+
 
 HEADERS = [
     "hubspot_company_id",
@@ -69,10 +70,21 @@ def hs_headers() -> Dict[str, str]:
 
 
 def get_worksheet():
-    creds = Credentials.from_service_account_file(
-        GOOGLE_SHEETS_CREDENTIALS_FILE,
+    google_service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+
+    if not google_service_account_json:
+        raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON is missing.")
+
+    if not GOOGLE_SHEET_NAME:
+        raise ValueError("GOOGLE_SHEET_NAME is missing.")
+
+    service_account_info = json.loads(google_service_account_json)
+
+    creds = Credentials.from_service_account_info(
+        service_account_info,
         scopes=SCOPES
     )
+
     client = gspread.authorize(creds)
     sheet = client.open(GOOGLE_SHEET_NAME)
     ws = sheet.sheet1
