@@ -1,8 +1,12 @@
 requests
+pandas
+beautifulsoup4
+rapidfuzz
+python-dotenv
+lxml
+openpyxl
+fpdf2
 gspread
 google-auth
 google-auth-oauthlib
 google-auth-httplib2
-pandas
-python-dotenv
-fpdf2
