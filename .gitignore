@@ -1,0 +1,8 @@
+.env
+*.env
+google_service_account.json
+resolver_cache.json
+restaurants.xlsx
+results.xlsx
+__pycache__/
+*.pyc
