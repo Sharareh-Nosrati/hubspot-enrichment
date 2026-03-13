@@ -349,8 +349,16 @@ def build_note_body(result, name: str, city: str, country: str) -> str:
     ) and not (result.website or result.instagram or result.facebook):
         status = "error"
 
+    no_profile_message = ""
+    if not (result.website or result.instagram or result.facebook):
+        no_profile_message = (
+            "<b>Search Result:</b> No official website or social profiles were found "
+            "after trying multiple discovery methods (OSM, guessed domain, and search providers).<br><br>"
+        )
+
     return (
         f"<b>Online Presence Analysis</b><br><br>"
+        f"{no_profile_message}"
         f"<b>Confidence:</b> {round(result.confidence, 3)}<br>"
         f"<b>Needs review:</b> {bool_to_yes_no(result.needs_review)}<br>"
         f"<b>Status:</b> {status}<br>"
