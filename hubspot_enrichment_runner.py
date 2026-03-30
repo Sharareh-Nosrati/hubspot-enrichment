@@ -127,7 +127,7 @@ def get_worksheet():
     if not existing_headers:
         ws.append_row(HEADERS)
     elif existing_headers != HEADERS:
-        ws.update("A1:V1", [HEADERS])
+        ws.update(values=[HEADERS], range_name="A1:X1")
 
     _worksheet = ws
     return _worksheet
@@ -256,7 +256,11 @@ def upsert_company_result(
 
     existing_row = find_row_by_company_id(ws, str(company_id))
     if existing_row:
-        ws.update(f"A{existing_row}:V{existing_row}", [row], value_input_option="USER_ENTERED")
+        ws.update(
+            values=[row],
+            range_name=f"A{existing_row}:X{existing_row}",
+            value_input_option="USER_ENTERED"
+        )
     else:
         ws.append_row(row, value_input_option="USER_ENTERED")
 
