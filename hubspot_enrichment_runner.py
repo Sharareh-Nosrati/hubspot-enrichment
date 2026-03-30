@@ -28,6 +28,7 @@ POLL_LIMIT = int(os.getenv("HUBSPOT_BATCH_LIMIT", "2"))
 SLEEP_BETWEEN_RECORDS = float(os.getenv("REQUEST_DELAY", "1"))
 
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "")
+
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 
 _gspread_client = None
@@ -136,7 +137,6 @@ def get_existing_company_ids(ws) -> set[str]:
     values = ws.col_values(1)
     return {v for v in values[1:] if v}
 
-
 def find_row_by_company_id(ws, company_id: str):
     if ws is None:
         raise ValueError("Worksheet is None in find_row_by_company_id().")
@@ -181,7 +181,6 @@ def upsert_company_result(
     evidence_override: str = ""
 ) -> None:
     pdf_cell_value = pdf_url or ""
-
     if result is not None:
         status = "ok"
         evidence_text = result.evidence or ""
