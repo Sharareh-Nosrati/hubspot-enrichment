@@ -1,1033 +1,685 @@
+from __future__ import annotations
+
+import io
 import os
 import re
-import time
 import json
-from dataclasses import dataclass
-from typing import Optional, Dict, Any, List, Tuple, Set
-from urllib.parse import urlparse, urljoin
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-import pandas as pd
 import requests
-from bs4 import BeautifulSoup
-from rapidfuzz import fuzz
-
-from search_provider_router import build_router, SearchResult
+import pandas as pd
 from dotenv import load_dotenv
+
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+import resolve_restaurants as rr
+
 load_dotenv()
 
 
-# -----------------------------
-# Config
-# -----------------------------
-OVERPASS_URLS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://lz4.overpass-api.de/api/interpreter"
+# =========================================================
+# ENV CONFIG
+# =========================================================
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
+GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "")
+GOOGLE_OUTPUT_SHEET_NAME = os.getenv("GOOGLE_OUTPUT_SHEET_NAME", f"{GOOGLE_SHEET_NAME}_output" if GOOGLE_SHEET_NAME else "output")
+
+HUBSPOT_TOKEN = os.getenv("HUBSPOT_TOKEN", "")
+HUBSPOT_BATCH_LIMIT = int(os.getenv("HUBSPOT_BATCH_LIMIT", "50"))
+REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "1.0"))
+
+# Optional Render/runtime paths
+WORK_DIR = os.getenv("WORK_DIR", ".")
+PDF_DIR = os.getenv("PDF_DIR", "generated_pdfs")
+LOCAL_OUTPUT_XLSX = os.getenv("LOCAL_OUTPUT_XLSX", "output_with_pdf.xlsx")
+
+# Optional HubSpot defaults
+DEFAULT_HUBSPOT_OBJECT_TYPE = os.getenv("DEFAULT_HUBSPOT_OBJECT_TYPE", "contacts")
+HUBSPOT_FILE_FOLDER_PATH = os.getenv("HUBSPOT_FILE_FOLDER_PATH", "/online-presence-reports")
+HUBSPOT_FILE_ACCESS = os.getenv("HUBSPOT_FILE_ACCESS", "PRIVATE")
+
+# Optional row filter
+ONLY_PROCESS_ROWS_WITHOUT_STATUS = os.getenv("ONLY_PROCESS_ROWS_WITHOUT_STATUS", "false").lower() == "true"
+
+# Google scopes
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
 ]
-UA = "RestaurantResolver/1.0 (contact: you@example.com)"
-
-TIMEOUT = 25
-SLEEP_BETWEEN_REQUESTS_SEC = 1.0
-CACHE_PATH = "resolver_cache.json"
-
-SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
-GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "")
 
 
-# -----------------------------
-# Cache helpers
-# -----------------------------
-def load_cache() -> dict:
-    if os.path.exists(CACHE_PATH):
-        try:
-            with open(CACHE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-def save_cache(cache: dict):
-    with open(CACHE_PATH, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
-
-def cache_key(name: str, city: str, country: str) -> str:
-    return f"{norm(name)}|{norm(city)}|{norm(country)}"
+# =========================================================
+# GENERIC HELPERS
+# =========================================================
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def norm(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip().lower())
+def now_utc_text() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-def generate_name_variants(name: str) -> List[str]:
-    n = norm(name)
-    variants = {n}
 
-    removable_words = [
-        "ristorante", "pizzeria", "osteria", "trattoria",
-        "bar", "cafe", "rist", "pizza"
-    ]
-
-    words = n.split()
-    filtered = [w for w in words if w not in removable_words]
-    if filtered:
-        variants.add(" ".join(filtered))
-
-    variants.add(n.replace("'", ""))
-    variants.add(n.replace("-", " "))
-    variants.add(n.replace("&", "and"))
-
-    return list(variants)
-
-def ensure_http(url: str) -> str:
-    url = (url or "").strip()
-    if not url:
-        return url
-    if url.startswith("http://") or url.startswith("https://"):
-        return url
-    if url.startswith("//"):
-        return "https:" + url
-    return "https://" + url
-
-def base_domain(url: str) -> str:
-    try:
-        parsed = urlparse(ensure_http(url))
-        host = parsed.netloc.lower()
-        if host.startswith("www."):
-            host = host[4:]
-        return host
-    except Exception:
+def safe_str(value: Any) -> str:
+    if value is None:
         return ""
+    return str(value).strip()
 
-def clean_social_url(u: str) -> Optional[str]:
-    if not u or not isinstance(u, str):
-        return None
 
-    u = u.strip()
-    if not u:
-        return None
+def yn(value: bool) -> str:
+    return "Yes" if bool(value) else "No"
 
-    if u.startswith("//"):
-        u = "https:" + u
-    elif not u.startswith("http://") and not u.startswith("https://"):
-        if "instagram.com" in u or "facebook.com" in u:
-            u = "https://" + u
 
-    u_lower = u.lower()
-
-    bad_patterns = [
-        "facebook.com/sharer",
-        "facebook.com/share",
-        "l.facebook.com",
-        "m.facebook.com/sharer",
-        "instagram.com/p/",
-        "instagram.com/reel/",
-        "instagram.com/stories/",
-        "instagram.com/explore/",
-        "api.whatsapp.com",
-        "wa.me/",
-        "javascript:",
-        "mailto:",
-        "#"
-    ]
-    if any(b in u_lower for b in bad_patterns):
-        return None
-
-    u = re.sub(r"([?&])(utm_[^=&]+|fbclid|gclid)=[^&#]*", "", u, flags=re.IGNORECASE)
-    u = re.sub(r"[?&]+$", "", u)
-
-    u_lower = u.lower()
-
-    if "instagram.com/" in u_lower:
-        m = re.search(r"(https?://(?:www\.)?instagram\.com/[^/?#]+)/?", u, flags=re.IGNORECASE)
-        if m:
-            u = m.group(1) + "/"
-
-    if "facebook.com/" in u_lower:
-        u = u.split("&")[0]
-
-    return u
-
-def fetch_url(url: str) -> Optional[str]:
+def pct_from_score(value: Optional[float]) -> str:
     try:
-        r = requests.get(
-            ensure_http(url),
-            headers={"User-Agent": UA},
-            timeout=TIMEOUT,
-            allow_redirects=True
-        )
-        if 200 <= r.status_code < 300 and r.text:
-            return r.text
-    except requests.RequestException:
-        return None
-    return None
-
-def is_probably_restaurant(tags: Dict[str, str]) -> bool:
-    amenity = (tags.get("amenity") or "").lower()
-    shop = (tags.get("shop") or "").lower()
-    tourism = (tags.get("tourism") or "").lower()
-    return amenity in {"restaurant", "fast_food", "cafe", "bar", "pub"} or shop == "bakery" or tourism == "hotel"
+        return f"{round(float(value) * 100, 1)}%"
+    except Exception:
+        return "-"
 
 
-# -----------------------------
-# Candidate scoring
-# -----------------------------
-def score_text_candidate(name: str, city: str, title: str = "", snippet: str = "", url: str = "") -> float:
-    target_name = norm(name)
-    title_n = norm(title)
-    snippet_n = norm(snippet)
-    url_n = norm(url)
-    city_n = norm(city)
+def value_or_dash(value: Any) -> str:
+    v = safe_str(value)
+    return v if v else "-"
 
+
+def safe_filename(value: str, max_len: int = 90) -> str:
+    value = safe_str(value)
+    value = re.sub(r"[^\w\s\-]", "", value, flags=re.UNICODE)
+    value = re.sub(r"\s+", "_", value).strip("_")
+    if not value:
+        value = "lead"
+    return value[:max_len]
+
+
+def ensure_dir(path: str) -> str:
+    Path(path).mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def unique_keep_order(items: List[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for item in items:
+        if not item:
+            continue
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+# =========================================================
+# GOOGLE SHEETS
+# =========================================================
+def get_google_sheets_service():
+    if not GOOGLE_SERVICE_ACCOUNT_JSON:
+        raise ValueError("Missing GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not GOOGLE_SHEET_ID:
+        raise ValueError("Missing GOOGLE_SHEET_ID")
+
+    try:
+        info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON: {e}") from e
+
+    credentials = service_account.Credentials.from_service_account_info(
+        info,
+        scopes=GOOGLE_SCOPES,
+    )
+    return build("sheets", "v4", credentials=credentials, cache_discovery=False)
+
+
+def ensure_sheet_exists(service, spreadsheet_id: str, sheet_name: str) -> None:
+    meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    existing_names = {
+        s["properties"]["title"]
+        for s in meta.get("sheets", [])
+    }
+
+    if sheet_name in existing_names:
+        return
+
+    body = {
+        "requests": [
+            {
+                "addSheet": {
+                    "properties": {
+                        "title": sheet_name
+                    }
+                }
+            }
+        ]
+    }
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body=body,
+    ).execute()
+
+
+def read_sheet_as_dataframe(service, spreadsheet_id: str, sheet_name: str) -> pd.DataFrame:
+    result = service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=sheet_name,
+    ).execute()
+
+    values = result.get("values", [])
+    if not values:
+        return pd.DataFrame()
+
+    headers = [safe_str(x).lower() for x in values[0]]
+    rows = values[1:]
+
+    normalized_rows: List[List[str]] = []
+    for row in rows:
+        row_extended = list(row) + [""] * (len(headers) - len(row))
+        normalized_rows.append(row_extended[:len(headers)])
+
+    df = pd.DataFrame(normalized_rows, columns=headers)
+    return df
+
+
+def write_dataframe_to_sheet(service, spreadsheet_id: str, sheet_name: str, df: pd.DataFrame) -> None:
+    ensure_sheet_exists(service, spreadsheet_id, sheet_name)
+
+    values: List[List[Any]] = [list(df.columns)]
+    for _, row in df.iterrows():
+        values.append([row[col] for col in df.columns])
+
+    clear_range = f"{sheet_name}!A:ZZ"
+    service.spreadsheets().values().clear(
+        spreadsheetId=spreadsheet_id,
+        range=clear_range,
+        body={},
+    ).execute()
+
+    service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"{sheet_name}!A1",
+        valueInputOption="RAW",
+        body={"values": values},
+    ).execute()
+
+
+# =========================================================
+# BUSINESS SUMMARY HELPERS
+# =========================================================
+def extra_directory_links(result: rr.ResolveResult) -> List[str]:
+    all_links = rr.json_list(result.directory_links_json)
+    known = {
+        result.google_maps_url,
+        result.justeat_url,
+        result.deliveroo_url,
+        result.thefork_url,
+        result.tripadvisor_url,
+        result.glovo_url,
+        result.restaurantguru_url,
+        result.opentable_url,
+        result.quandoo_url,
+    }
+    return [x for x in all_links if x and x not in known]
+
+
+def website_search_candidates_with_scores(
+    result: rr.ResolveResult,
+    max_items: int = 5,
+) -> List[Dict[str, Any]]:
+    urls = rr.json_list(result.official_website_candidates_json)
+    urls = unique_keep_order(urls)[:max_items]
+
+    scored: List[Dict[str, Any]] = []
+    for url in urls:
+        try:
+            details = rr.website_validation_details(result.name, result.city, url)
+            scored.append({
+                "url": url,
+                "score": float(details.get("score", 0.0)),
+                "is_valid": bool(details.get("is_valid", False)),
+                "reason": details.get("reason", ""),
+            })
+        except Exception as e:
+            scored.append({
+                "url": url,
+                "score": 0.0,
+                "is_valid": False,
+                "reason": f"validation_error: {e}",
+            })
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored
+
+
+def calculate_total_score(result: rr.ResolveResult) -> int:
     score = 0.0
 
-    name_sim = fuzz.token_set_ratio(target_name, title_n) / 100.0
-    score += name_sim * 0.55
+    if result.website:
+        score += 24
+    if result.instagram:
+        score += 8
+    if result.facebook:
+        score += 8
+    if result.tiktok:
+        score += 8
+    if result.google_maps_url:
+        score += 12
+    if result.threads:
+        score += 4
+    if result.x:
+        score += 4
+    if result.youtube:
+        score += 4
 
-    if city_n and city_n in title_n:
-        score += 0.15
-    if city_n and city_n in snippet_n:
-        score += 0.12
-    if city_n and city_n in url_n:
-        score += 0.08
+    if result.menu_present:
+        score += 6
+    if result.booking_present:
+        score += 5
+    if result.delivery_present:
+        score += 5
+    if result.data_capture_present:
+        score += 4
+    if result.contact_present:
+        score += 5
 
-    if target_name in snippet_n:
-        score += 0.10
-
-    return min(score, 1.0)
-
-def score_social_candidate(name: str, city: str, title: str = "", snippet: str = "", url: str = "") -> float:
-    score = score_text_candidate(name, city, title, snippet, url)
-
-    ul = url.lower()
-    if "instagram.com" in ul or "facebook.com" in ul:
-        score += 0.10
-
-    if "/pages/" in ul:
-        score -= 0.08
-
-    return max(0.0, min(score, 1.0))
-
-
-# -----------------------------
-# HTML parsing
-# -----------------------------
-def extract_socials_from_html(html: str) -> Dict[str, Optional[str]]:
-    soup = BeautifulSoup(html, "lxml")
-    found_urls = []
-
-    for a in soup.find_all("a", href=True):
-        found_urls.append(a.get("href"))
-
-    for meta in soup.find_all(["meta", "link"]):
-        for attr in ["content", "href"]:
-            val = meta.get(attr)
-            if val and isinstance(val, str):
-                found_urls.append(val)
-
-    for script in soup.find_all("script", type="application/ld+json"):
-        raw = script.string or script.text
-        if not raw:
-            continue
-        try:
-            data = json.loads(raw)
-            blocks = data if isinstance(data, list) else [data]
-            for block in blocks:
-                if isinstance(block, dict):
-                    same_as = block.get("sameAs")
-                    if isinstance(same_as, list):
-                        found_urls.extend([x for x in same_as if isinstance(x, str)])
-                    elif isinstance(same_as, str):
-                        found_urls.append(same_as)
-        except Exception:
-            pass
-
-    cleaned = []
-    seen = set()
-    for u in found_urls:
-        cu = clean_social_url(u)
-        if cu and cu not in seen:
-            seen.add(cu)
-            cleaned.append(cu)
-
-    ig = None
-    fb = None
-
-    for u in cleaned:
-        ul = u.lower()
-        if not ig and "instagram.com" in ul:
-            ig = u
-        if not fb and "facebook.com" in ul:
-            fb = u
-        if ig and fb:
-            break
-
-    return {"instagram": ig, "facebook": fb}
-
-def extract_business_profiles_from_results(results: List[SearchResult]) -> Dict[str, Optional[str]]:
-    website = None
-    facebook = None
-    instagram = None
-
-    bad_facebook_parts = ["/posts/", "/photo.php", "/photos/", "/media/", "/mentions/"]
-    bad_instagram_parts = ["/p/", "/reel/", "/stories/"]
-
-    for r in results:
-        url = r.url.split("?")[0].rstrip("/")
-        domain = r.domain.lower()
-
-        if "facebook.com" in domain:
-            if not any(part in url for part in bad_facebook_parts):
-                if not facebook:
-                    facebook = url + "/"
-            continue
-
-        if "instagram.com" in domain:
-            if not any(part in url for part in bad_instagram_parts):
-                if not instagram:
-                    instagram = url + "/"
-            continue
-
-        if domain and all(x not in domain for x in [
-            "facebook.com", "instagram.com", "linkedin.com", "youtube.com",
-            "tripadvisor.", "thefork.", "ubereats.", "justeat.", "glovoapp.", "deliveroo."
-        ]):
-            if not website:
-                website = url + "/"
-
-    return {
-        "website": website,
-        "facebook": facebook,
-        "instagram": instagram,
-    }
-
-
-def find_profiles_via_search_router(
-    name: str, city: str, country: str
-) -> Tuple[Dict[str, Optional[str]], List[str], Optional[str]]:
-    evidence = []
+    if result.thefork_url:
+        score += 4
+    if result.tripadvisor_url:
+        score += 4
+    if result.opentable_url:
+        score += 3
+    if result.justeat_url:
+        score += 2
+    if result.deliveroo_url:
+        score += 2
+    if result.glovo_url:
+        score += 2
+    if result.restaurantguru_url:
+        score += 1
+    if result.quandoo_url:
+        score += 1
 
     try:
-        router = build_router()
-    except Exception as e:
-        return {"website": None, "facebook": None, "instagram": None}, [f"Router init failed: {e}"], None
+        score += min(max(float(result.website_validation_score), 0.0), 1.0) * 6
+    except Exception:
+        pass
 
-    query = f"{name} {city} restaurant ristorante pizzeria official website facebook instagram"
-    response = router.search(query, country="IT", language="it", count=10)
+    return max(0, min(100, round(score)))
 
-    if not response.ok:
-        return {"website": None, "facebook": None, "instagram": None}, [
-            f"Router search failed: {response.error_message}"
-        ], None
 
-    profiles = extract_business_profiles_from_results(response.results)
+def generate_hubspot_note_summary(
+    result: rr.ResolveResult,
+    generated_at: str,
+    total_score: int,
+    confidence_total_percentage: float,
+) -> str:
+    search_candidates = website_search_candidates_with_scores(result, max_items=5)
+    search_lines = []
+    for item in search_candidates:
+        search_lines.append(f"- Website: {item['url']}, {round(item['score'] * 100, 1)}%")
 
-    evidence.append(f"Router provider used: {response.provider}")
-    evidence.append(
-        f"Router profiles found: website={bool(profiles['website'])}, "
-        f"facebook={bool(profiles['facebook'])}, instagram={bool(profiles['instagram'])}"
+    extra_links = extra_directory_links(result)
+    extra_links_text = "\n".join([f"- {x}" for x in extra_links[:10]]) if extra_links else "-"
+
+    note = f"""
+Online Presence Summary
+
+Lead: {result.name}
+Website: {result.website or "-"}
+Generated: {generated_at}
+Total score: {total_score}/100
+Confidence total percentage: {round(confidence_total_percentage, 1)}%
+
+Search links (when website is missing):
+{chr(10).join(search_lines) if search_lines else "-"}
+
+Website checks:
+- Menu: {yn(result.menu_present)}
+- Booking: {yn(result.booking_present)}
+- Delivery: {yn(result.delivery_present)}
+- Data capture: {yn(result.data_capture_present)}
+- Contact info: {yn(result.contact_present)}
+- Website creator: {result.website_creator or result.website_platform or "-"}
+
+Presence links:
+- Instagram: {result.instagram or "-"}, {pct_from_score(result.instagram_score)}
+- Facebook: {result.facebook or "-"}, {pct_from_score(result.facebook_score)}
+- TikTok: {result.tiktok or "-"}, {pct_from_score(result.tiktok_score)}
+- Google Maps: {result.google_maps_url or "-"}, {pct_from_score(0.85 if result.google_maps_url else 0.0)}
+- Threads: {result.threads or "-"}, {pct_from_score(result.threads_score)}
+- X: {result.x or "-"}, {pct_from_score(result.x_score)}
+
+Other general links:
+- TheFork: {result.thefork_url or "-"}
+- TripAdvisor: {result.tripadvisor_url or "-"}
+- OpenTable: {result.opentable_url or "-"}
+- Extra links:
+{extra_links_text}
+""".strip()
+
+    return note
+
+
+# =========================================================
+# PDF GENERATION
+# =========================================================
+def build_pdf_styles():
+    styles = getSampleStyleSheet()
+
+    styles.add(ParagraphStyle(
+        name="DocTitle",
+        parent=styles["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=19,
+        leading=23,
+        textColor=colors.HexColor("#17324D"),
+        spaceAfter=8,
+    ))
+    styles.add(ParagraphStyle(
+        name="Meta",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=9.5,
+        leading=12,
+        textColor=colors.HexColor("#5A6470"),
+        spaceAfter=2,
+    ))
+    styles.add(ParagraphStyle(
+        name="SectionTitle",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=11.5,
+        leading=14,
+        textColor=colors.HexColor("#17324D"),
+        spaceBefore=7,
+        spaceAfter=5,
+    ))
+    styles.add(ParagraphStyle(
+        name="Cell",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=8.8,
+        leading=11,
+        textColor=colors.black,
+        alignment=TA_LEFT,
+    ))
+    styles.add(ParagraphStyle(
+        name="LinkCell",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=8.5,
+        leading=10.8,
+        textColor=colors.HexColor("#0B57D0"),
+        alignment=TA_LEFT,
+    ))
+    return styles
+
+
+def make_table(rows: List[List[Any]], col_widths: List[float]) -> Table:
+    tbl = Table(rows, colWidths=col_widths, repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EAF1F8")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#17324D")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("LEADING", (0, 0), (-1, -1), 11),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD4E1")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FBFE")]),
+    ]))
+    return tbl
+
+
+def create_lead_summary_pdf_bytes(
+    result: rr.ResolveResult,
+    generated_at: str,
+    total_score: int,
+    confidence_total_percentage: float,
+) -> bytes:
+    styles = build_pdf_styles()
+    buffer = io.BytesIO()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=15 * mm,
+        rightMargin=15 * mm,
+        topMargin=15 * mm,
+        bottomMargin=15 * mm,
+        title=f"Online Presence Summary - {result.name}",
     )
 
-    return profiles, evidence, response.provider
+    story = []
 
+    story.append(Paragraph("Online Presence Summary", styles["DocTitle"]))
+    story.append(Paragraph(f"<b>Lead:</b> {value_or_dash(result.name)}", styles["Meta"]))
+    story.append(Paragraph(f"<b>Website:</b> {value_or_dash(result.website)}", styles["Meta"]))
+    story.append(Paragraph(f"<b>Generated:</b> {generated_at}", styles["Meta"]))
+    story.append(Spacer(1, 6))
 
-# -----------------------------
-# Website feature analysis
-# -----------------------------
-def get_internal_candidate_links(base_url: str, html: str, max_links: int = 8) -> List[str]:
-    soup = BeautifulSoup(html, "lxml")
-    base_host = base_domain(base_url)
-    links = []
-    seen = set()
-
-    interesting_keywords = [
-        "menu", "menù", "carta", "food",
-        "book", "booking", "reserve", "reservation", "prenota", "prenotazione",
-        "delivery", "takeaway", "asporto", "ordina", "ordine",
-        "contact", "contatti", "about", "newsletter"
+    top_rows = [
+        [Paragraph("Metric", styles["Cell"]), Paragraph("Value", styles["Cell"])],
+        [Paragraph("Total score", styles["Cell"]), Paragraph(f"{total_score}/100", styles["Cell"])],
+        [Paragraph("Confidence total percentage", styles["Cell"]), Paragraph(f"{round(confidence_total_percentage, 1)}%", styles["Cell"])],
     ]
+    story.append(make_table(top_rows, [62 * mm, 108 * mm]))
+    story.append(Spacer(1, 8))
 
-    for a in soup.find_all("a", href=True):
-        href = a.get("href", "").strip()
-        if not href:
-            continue
+    if not result.website:
+        search_candidates = website_search_candidates_with_scores(result, max_items=5)
+        story.append(Paragraph("Search links (when website is missing)", styles["SectionTitle"]))
+        search_rows = [[Paragraph("Website", styles["Cell"]), Paragraph("Confidence", styles["Cell"])]]
+        if search_candidates:
+            for item in search_candidates:
+                search_rows.append([
+                    Paragraph(value_or_dash(item["url"]), styles["LinkCell"]),
+                    Paragraph(f"{round(item['score'] * 100, 1)}%", styles["Cell"]),
+                ])
+        else:
+            search_rows.append([Paragraph("-", styles["Cell"]), Paragraph("-", styles["Cell"])])
+        story.append(make_table(search_rows, [138 * mm, 32 * mm]))
+        story.append(Spacer(1, 8))
 
-        full = urljoin(base_url, href)
-        full = ensure_http(full)
-        host = base_domain(full)
+    story.append(Paragraph("Website checks", styles["SectionTitle"]))
+    website_rows = [
+        [Paragraph("Check", styles["Cell"]), Paragraph("Value", styles["Cell"])],
+        [Paragraph("Menu", styles["Cell"]), Paragraph(yn(result.menu_present), styles["Cell"])],
+        [Paragraph("Booking", styles["Cell"]), Paragraph(yn(result.booking_present), styles["Cell"])],
+        [Paragraph("Delivery", styles["Cell"]), Paragraph(yn(result.delivery_present), styles["Cell"])],
+        [Paragraph("Data capture", styles["Cell"]), Paragraph(yn(result.data_capture_present), styles["Cell"])],
+        [Paragraph("Contact info", styles["Cell"]), Paragraph(yn(result.contact_present), styles["Cell"])],
+        [Paragraph("Website creator", styles["Cell"]), Paragraph(value_or_dash(result.website_creator or result.website_platform), styles["Cell"])],
+    ]
+    story.append(make_table(website_rows, [60 * mm, 110 * mm]))
+    story.append(Spacer(1, 8))
 
-        if host != base_host:
-            continue
+    story.append(Paragraph("Presence links", styles["SectionTitle"]))
+    presence_rows = [
+        [Paragraph("Channel", styles["Cell"]), Paragraph("Link", styles["Cell"]), Paragraph("Confidence", styles["Cell"])],
+        [Paragraph("Instagram", styles["Cell"]), Paragraph(value_or_dash(result.instagram), styles["LinkCell"]), Paragraph(pct_from_score(result.instagram_score), styles["Cell"])],
+        [Paragraph("Facebook", styles["Cell"]), Paragraph(value_or_dash(result.facebook), styles["LinkCell"]), Paragraph(pct_from_score(result.facebook_score), styles["Cell"])],
+        [Paragraph("TikTok", styles["Cell"]), Paragraph(value_or_dash(result.tiktok), styles["LinkCell"]), Paragraph(pct_from_score(result.tiktok_score), styles["Cell"])],
+        [Paragraph("Google Maps", styles["Cell"]), Paragraph(value_or_dash(result.google_maps_url), styles["LinkCell"]), Paragraph(pct_from_score(0.85 if result.google_maps_url else 0.0), styles["Cell"])],
+        [Paragraph("Threads", styles["Cell"]), Paragraph(value_or_dash(result.threads), styles["LinkCell"]), Paragraph(pct_from_score(result.threads_score), styles["Cell"])],
+        [Paragraph("X", styles["Cell"]), Paragraph(value_or_dash(result.x), styles["LinkCell"]), Paragraph(pct_from_score(result.x_score), styles["Cell"])],
+    ]
+    story.append(make_table(presence_rows, [28 * mm, 112 * mm, 30 * mm]))
+    story.append(Spacer(1, 8))
 
-        low = full.lower()
-        text = (a.get_text(" ", strip=True) or "").lower()
-        combined = low + " " + text
+    story.append(Paragraph("Other general links", styles["SectionTitle"]))
+    extra_links = extra_directory_links(result)
+    extra_links_text = "<br/>".join(extra_links[:12]) if extra_links else "-"
 
-        if any(k in combined for k in interesting_keywords):
-            if full not in seen:
-                seen.add(full)
-                links.append(full)
+    other_rows = [
+        [Paragraph("Item", styles["Cell"]), Paragraph("Value", styles["Cell"])],
+        [Paragraph("TheFork", styles["Cell"]), Paragraph(value_or_dash(result.thefork_url), styles["LinkCell"])],
+        [Paragraph("TripAdvisor", styles["Cell"]), Paragraph(value_or_dash(result.tripadvisor_url), styles["LinkCell"])],
+        [Paragraph("OpenTable", styles["Cell"]), Paragraph(value_or_dash(result.opentable_url), styles["LinkCell"])],
+        [Paragraph("Extra links", styles["Cell"]), Paragraph(extra_links_text, styles["LinkCell"])],
+    ]
+    story.append(make_table(other_rows, [42 * mm, 128 * mm]))
 
-        if len(links) >= max_links:
-            break
+    doc.build(story)
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    return pdf_bytes
 
-    return links
 
-def analyze_single_html(html: str) -> Dict[str, bool]:
-    soup = BeautifulSoup(html, "lxml")
-    text = soup.get_text(" ", strip=True).lower()
-    links = [a.get("href", "").lower() for a in soup.find_all("a", href=True)]
-    buttons = [b.get_text(" ", strip=True).lower() for b in soup.find_all(["button", "a"])]
-    forms = soup.find_all("form")
-    iframes = [i.get("src", "").lower() for i in soup.find_all("iframe", src=True)]
-
-    all_content = " ".join([
-        text,
-        " ".join(links),
-        " ".join(buttons),
-        " ".join(iframes)
-    ])
-
-    def has_any(keywords: List[str]) -> bool:
-        return any(k in all_content for k in keywords)
-
-    menu_present = has_any([
-        "menu", "menù", "our-menu", "food-menu", "carta", "scarica il menu",
-        ".pdf", "menu degustazione"
-    ])
-
-    booking_present = has_any([
-        "book", "booking", "reserve", "reservation",
-        "prenota", "prenotazione", "thefork", "opentable",
-        "quandoo", "resmio", "book a table", "table booking"
-    ])
-
-    delivery_present = has_any([
-        "delivery", "takeaway", "asporto", "consegna", "a domicilio",
-        "deliveroo", "ubereats", "just eat", "justeat", "glovo", "ordina online"
-    ])
-
-    data_capture_present = (
-        len(forms) > 0
-        or has_any([
-            "newsletter", "subscribe", "sign up", "join",
-            "iscriviti", "lascia i tuoi dati", "contattaci",
-            "request info", "contact form"
-        ])
-    )
-
-    contact_present = (
-        has_any(["contact", "contatti", "tel:", "mailto:", "whatsapp", "dove siamo"])
-        or bool(re.search(r"\+?\d[\d\-\s()]{6,}", text))
-        or bool(re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text))
-    )
-
+# =========================================================
+# HUBSPOT API
+# =========================================================
+def hubspot_headers() -> Dict[str, str]:
+    if not HUBSPOT_TOKEN:
+        raise ValueError("Missing HUBSPOT_TOKEN")
     return {
-        "menu_present": menu_present,
-        "booking_present": booking_present,
-        "delivery_present": delivery_present,
-        "data_capture_present": data_capture_present,
-        "contact_present": contact_present
+        "Authorization": f"Bearer {HUBSPOT_TOKEN}",
     }
 
-def analyze_website_features(website_url: str) -> Dict[str, bool]:
-    result = {
-        "menu_present": False,
-        "booking_present": False,
-        "delivery_present": False,
-        "data_capture_present": False,
-        "contact_present": False
+
+def get_note_association_type_id(to_object_type: str) -> int:
+    """
+    Try to fetch dynamically.
+    Fall back to default contact association type 202 if object is contacts.
+    """
+    url = f"https://api.hubapi.com/crm/v4/associations/notes/{to_object_type}/labels"
+    resp = requests.get(url, headers=hubspot_headers(), timeout=30)
+
+    if resp.ok:
+        data = resp.json()
+        results = data.get("results", [])
+        if results:
+            for item in results:
+                if item.get("category") == "HUBSPOT_DEFINED":
+                    type_id = item.get("typeId")
+                    if type_id:
+                        return int(type_id)
+            type_id = results[0].get("typeId")
+            if type_id:
+                return int(type_id)
+
+    if to_object_type == "contacts":
+        return 202
+
+    raise RuntimeError(f"Could not determine note associationTypeId for object type '{to_object_type}'")
+
+
+def upload_pdf_to_hubspot(pdf_bytes: bytes, filename: str) -> Dict[str, Any]:
+    url = "https://api.hubapi.com/files/v3/files"
+
+    files = {
+        "file": (filename, pdf_bytes, "application/pdf"),
+    }
+    data = {
+        "folderPath": HUBSPOT_FILE_FOLDER_PATH,
+        "fileName": filename,
+        "options": json.dumps({
+            "access": HUBSPOT_FILE_ACCESS,
+            "duplicateValidationStrategy": "RETURN_EXISTING",
+            "duplicateValidationScope": "ENTIRE_PORTAL",
+        }),
     }
 
-    homepage_html = fetch_url(website_url)
-    if not homepage_html:
-        return result
+    resp = requests.post(
+        url,
+        headers=hubspot_headers(),
+        files=files,
+        data=data,
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
-    homepage_result = analyze_single_html(homepage_html)
-    for k, v in homepage_result.items():
-        result[k] = result[k] or v
 
-    candidate_links = get_internal_candidate_links(website_url, homepage_html, max_links=8)
+def create_hubspot_note_with_attachment(
+    hubspot_object_id: str,
+    hubspot_object_type: str,
+    note_body: str,
+    file_id: str,
+    timestamp_iso: str,
+) -> Dict[str, Any]:
+    association_type_id = get_note_association_type_id(hubspot_object_type)
 
-    visited: Set[str] = set()
-    for link in candidate_links:
-        if link in visited:
-            continue
-        visited.add(link)
+    url = "https://api.hubapi.com/crm/v3/objects/notes"
+    body = {
+        "associations": [
+            {
+                "to": {"id": str(hubspot_object_id)},
+                "types": [
+                    {
+                        "associationCategory": "HUBSPOT_DEFINED",
+                        "associationTypeId": association_type_id,
+                    }
+                ],
+            }
+        ],
+        "properties": {
+            "hs_note_body": note_body,
+            "hs_timestamp": timestamp_iso,
+            "hs_attachment_ids": str(file_id),
+        },
+    }
 
-        html = fetch_url(link)
-        time.sleep(0.3)
-        if not html:
-            continue
+    resp = requests.post(
+        url,
+        headers={**hubspot_headers(), "Content-Type": "application/json"},
+        json=body,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
-        sub_result = analyze_single_html(html)
-        for k, v in sub_result.items():
-            result[k] = result[k] or v
 
+# =========================================================
+# CACHE / RECORD REBUILD
+# =========================================================
+def resolve_result_from_record(name: str, city: str, country: str, record: Dict[str, Any]) -> rr.ResolveResult:
+    result = rr.ResolveResult(name=name, city=city, country=country)
+    for field_name in result.__dataclass_fields__.keys():
+        if field_name in record:
+            setattr(result, field_name, record[field_name])
     return result
 
 
-# -----------------------------
-# Overpass
-# -----------------------------
-def overpass_search(name: str, city: str, country: str) -> Dict[str, Any]:
-    name_escaped = name.replace('"', '\\"')
-    city_escaped = city.replace('"', '\\"')
-    country_escaped = country.replace('"', '\\"')
+# =========================================================
+# PROCESS ONE ROW
+# =========================================================
+def process_row(row: Dict[str, Any], cache: Dict[str, Any], pdf_dir: str) -> Dict[str, Any]:
+    name = safe_str(row.get("name", ""))
+    city = safe_str(row.get("city", ""))
+    country = safe_str(row.get("country", ""))
 
-    query = f"""
-    [out:json][timeout:30];
-    area["name"="{country_escaped}"]["boundary"="administrative"]->.country;
-    (
-      area["name"="{city_escaped}"]["boundary"="administrative"](area.country)->.cityArea;
-    );
-    (
-      node(area.cityArea)["name"~"{name_escaped}", i]["amenity"];
-      way(area.cityArea)["name"~"{name_escaped}", i]["amenity"];
-      relation(area.cityArea)["name"~"{name_escaped}", i]["amenity"];
-      node(area.cityArea)["name"~"{name_escaped}", i]["shop"];
-      way(area.cityArea)["name"~"{name_escaped}", i]["shop"];
-      relation(area.cityArea)["name"~"{name_escaped}", i]["shop"];
-    );
-    out tags center 50;
-    """
+    if not name or not city or not country:
+        empty = rr.build_empty_record(row)
+        empty["pdf_summary_path"] = ""
+        empty["hubspot_note_summary"] = ""
+        empty["hubspot_file_id"] = ""
+        empty["hubspot_note_id"] = ""
+        empty["total_score"] = 0
+        empty["confidence_total_percentage"] = 0.0
+        empty["generated_at"] = now_utc_text()
+        empty["hubspot_status"] = "skipped_missing_required_fields"
+        return empty
 
-    errors = []
+    key = rr.cache_key(name, city, country)
 
-    for base_url in OVERPASS_URLS:
-        for attempt in range(2):
-            try:
-                r = requests.post(
-                    base_url,
-                    data=query.encode("utf-8"),
-                    headers={"User-Agent": UA},
-                    timeout=45
-                )
-                r.raise_for_status()
-                data = r.json()
-                if data.get("elements"):
-                    return data
-                else:
-                    return {"elements": [], "error": "OSM no matches"}
-
-            except requests.exceptions.Timeout as e:
-                errors.append(f"{base_url} timeout attempt {attempt + 1}: {str(e)}")
-            except requests.exceptions.RequestException as e:
-                errors.append(f"{base_url} request error attempt {attempt + 1}: {str(e)}")
-            except Exception as e:
-                errors.append(f"{base_url} unknown error attempt {attempt + 1}: {str(e)}")
-
-            time.sleep(2)
-
-    return {"elements": [], "error": " | ".join(errors)}
-
-def pick_best_osm_candidate(name: str, city: str, elements: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], float, List[str]]:
-    target = norm(name)
-    evidence = []
-    best = None
-    best_score = 0.0
-
-    for el in elements:
-        tags = el.get("tags", {}) or {}
-        el_name = tags.get("name") or ""
-        if not el_name:
-            continue
-
-        sim = fuzz.token_set_ratio(norm(el_name), target)
-
-        boost = 0
-        if tags.get("addr:city") and norm(tags.get("addr:city")) == norm(city):
-            boost += 8
-        if tags.get("phone") or tags.get("contact:phone"):
-            boost += 3
-        if tags.get("website") or tags.get("contact:website"):
-            boost += 6
-        if tags.get("facebook") or tags.get("contact:facebook") or tags.get("instagram") or tags.get("contact:instagram"):
-            boost += 4
-
-        if not is_probably_restaurant(tags):
-            sim *= 0.85
-
-        score = (sim + boost) / 112.0
-
-        if score > best_score:
-            best_score = score
-            best = el
-
-    if best:
-        tags = best.get("tags", {}) or {}
-        evidence.append(f"OSM best match name='{tags.get('name', '')}', score={best_score:.2f}")
-        if tags.get("addr:city"):
-            evidence.append(f"OSM addr:city='{tags.get('addr:city')}'")
-
-    return best, best_score, evidence
-
-
-# -----------------------------
-# Free guessed-domain fallback
-# -----------------------------
-def guess_possible_domains(name: str, country: str = "Italy") -> List[str]:
-    candidates = []
-    tlds = [".it", ".com"]
-
-    for variant in generate_name_variants(name):
-        cleaned = re.sub(r"[^a-z0-9\s-]", "", variant)
-        words = cleaned.split()
-
-        if not words:
-            continue
-
-        joined = "".join(words)
-        dashed = "-".join(words)
-
-        for tld in tlds:
-            candidates.append(f"https://www.{joined}{tld}")
-            candidates.append(f"https://{joined}{tld}")
-            candidates.append(f"https://www.{dashed}{tld}")
-            candidates.append(f"https://{dashed}{tld}")
-
-    seen = set()
-    unique = []
-    for c in candidates:
-        if c not in seen:
-            seen.add(c)
-            unique.append(c)
-
-    return unique
-
-def find_working_domain(name: str, city: str, country: str) -> Tuple[Optional[str], List[str]]:
-    evidence = []
-    domains = guess_possible_domains(name, country)
-    generic_names = {"la pergola", "ristorante", "pizzeria", "osteria", "trattoria"}
-
-    for url in domains:
-        html = fetch_url(url)
-        time.sleep(0.5)
-
-        if not html:
-            continue
-
-        text = BeautifulSoup(html, "lxml").get_text(" ", strip=True).lower()
-        name_match = norm(name) in text
-        city_match = norm(city) in text
-
-        if name_match and city_match:
-            evidence.append(f"Guessed working domain: {url}")
-            return url, evidence
-
-        if (
-            name_match
-            and len(norm(name).split()) >= 2
-            and norm(name) not in generic_names
-        ):
-            evidence.append(f"Guessed domain matched name strongly: {url}")
-            return url, evidence
-
-    return None, ["No guessed domain worked"]
-
-
-
-# -----------------------------
-# Optional: Google Places
-# -----------------------------
-def google_places_website(name: str, city: str, country: str) -> Optional[str]:
-    if not GOOGLE_PLACES_API_KEY:
-        return None
-
-    try:
-        text = f"{name} {city} {country}"
-
-        ts = requests.get(
-            "https://maps.googleapis.com/maps/api/place/textsearch/json",
-            params={"query": text, "key": GOOGLE_PLACES_API_KEY},
-            timeout=TIMEOUT
-        )
-        ts.raise_for_status()
-        ts_data = ts.json()
-        results = ts_data.get("results", [])
-        if not results:
-            return None
-
-        place_id = results[0].get("place_id")
-        if not place_id:
-            return None
-
-        pd_resp = requests.get(
-            "https://maps.googleapis.com/maps/api/place/details/json",
-            params={
-                "place_id": place_id,
-                "fields": "website,url,name,formatted_address,international_phone_number",
-                "key": GOOGLE_PLACES_API_KEY
-            },
-            timeout=TIMEOUT
-        )
-        pd_resp.raise_for_status()
-        det = pd_resp.json().get("result", {})
-        return det.get("website")
-    except requests.RequestException:
-        return None
-
-
-# -----------------------------
-# Result model
-# -----------------------------
-@dataclass
-class ResolveResult:
-    name: str
-    city: str
-    country: str
-    website: Optional[str] = None
-    instagram: Optional[str] = None
-    facebook: Optional[str] = None
-    confidence: float = 0.0
-    source: str = "none"
-    evidence: str = ""
-    needs_review: bool = True
-    menu_present: bool = False
-    booking_present: bool = False
-    delivery_present: bool = False
-    data_capture_present: bool = False
-    contact_present: bool = False
-    is_restaurant_match: bool = False
-    non_restaurant_reason: str = ""
-
-
-
-def validate_restaurant_match(
-    name: str,
-    city: str,
-    website: Optional[str],
-    instagram: Optional[str],
-    facebook: Optional[str]
-) -> Tuple[bool, str]:
-    target_name = norm(name)
-    target_city = norm(city)
-
-    restaurant_keywords = [
-        "restaurant", "ristorante", "pizzeria", "trattoria", "osteria",
-        "cucina", "menu", "menù", "prenota", "reservation", "booking",
-        "food", "delivery", "takeaway", "asporto", "bar", "cafe", "pub"
-    ]
-
-    reasons = []
-    positive_signals = 0
-
-    # --- Website validation ---
-    if website:
-        html = fetch_url(website)
-        time.sleep(0.3)
-
-        if html:
-            soup = BeautifulSoup(html, "lxml")
-            text = soup.get_text(" ", strip=True).lower()
-            title = (soup.title.get_text(" ", strip=True).lower() if soup.title else "")
-            combined = f"{title} {text}"
-
-            name_in_page = target_name in combined
-            city_in_page = target_city in combined if target_city else False
-            restaurant_kw = any(k in combined for k in restaurant_keywords)
-
-            if name_in_page:
-                positive_signals += 1
-            if city_in_page:
-                positive_signals += 1
-            if restaurant_kw:
-                positive_signals += 1
-
-            if not name_in_page:
-                reasons.append("Website does not clearly mention the restaurant name")
-            if not restaurant_kw:
-                reasons.append("Website does not look like a restaurant website")
-        else:
-            reasons.append("Website could not be fetched for validation")
-
-    # --- Instagram validation ---
-    if instagram:
-        ig_url = instagram.lower()
-        handle_match = any(x in ig_url for x in target_name.replace("'", "").split())
-        if handle_match:
-            positive_signals += 1
-        else:
-            reasons.append("Instagram handle does not match restaurant name")
-
-    # --- Facebook validation ---
-    if facebook:
-        fb_url = facebook.lower()
-        handle_match = any(x in fb_url for x in target_name.replace("'", "").split())
-        if handle_match:
-            positive_signals += 1
-        else:
-            reasons.append("Facebook page does not match restaurant name")
-
-    is_match = positive_signals >= 2
-
-    if not is_match and not reasons:
-        reasons.append("Found links do not provide enough evidence of being the restaurant")
-
-    return is_match, " | ".join(dict.fromkeys(reasons))
-
-
-
-# -----------------------------
-# Main resolver
-# -----------------------------
-def resolve_one(name: str, city: str, country: str) -> ResolveResult:
-    res = ResolveResult(name=name, city=city, country=country)
-    evidence: List[str] = []
-
-    # 1) OSM
-    osm = overpass_search(name, city, country)
-    elements = osm.get("elements", []) or []
-
-    if elements:
-        best, score, ev = pick_best_osm_candidate(name, city, elements)
-        evidence += ev
-
-        if best and score >= 0.55:
-            tags = best.get("tags", {}) or {}
-            website = tags.get("contact:website") or tags.get("website")
-            instagram = tags.get("contact:instagram") or tags.get("instagram")
-            facebook = tags.get("contact:facebook") or tags.get("facebook")
-
-            if website:
-                res.website = ensure_http(website)
-            if instagram:
-                res.instagram = ensure_http(instagram)
-            if facebook:
-                res.facebook = ensure_http(facebook)
-
-            res.confidence = max(res.confidence, score)
-            res.source = "osm"
-        else:
-            evidence.append("OSM candidates found but confidence below threshold")
+    if key in cache:
+        record = cache[key]
+        result = resolve_result_from_record(name, city, country, record)
+        status = record.get("status", "ok")
     else:
-        if osm.get("error"):
-            evidence.append(f"OSM error: {osm['error']}")
-        else:
-            evidence.append("OSM no matches")
-
-    # 2) If website found, scrape for socials
-    if res.website and (not res.instagram or not res.facebook):
-        html = fetch_url(res.website)
-        time.sleep(SLEEP_BETWEEN_REQUESTS_SEC)
-
-        if html:
-            socials = extract_socials_from_html(html)
-            if not res.instagram and socials.get("instagram"):
-                res.instagram = socials["instagram"]
-                evidence.append("Instagram extracted from website HTML")
-            if not res.facebook and socials.get("facebook"):
-                res.facebook = socials["facebook"]
-                evidence.append("Facebook extracted from website HTML")
-
-            if res.source == "osm":
-                res.source = "osm+site"
-                res.confidence = min(1.0, res.confidence + 0.10)
-        else:
-            evidence.append("Website scrape failed or empty HTML")
-
-    # 3) Free fallback: guess likely website domains
-    if not res.website:
-        guessed_website, ev = find_working_domain(name, city, country)
-        evidence += ev
-
-        if guessed_website:
-            res.website = guessed_website
-            res.source = "guessed_domain"
-            res.confidence = max(res.confidence, 0.50)
-
-            html = fetch_url(res.website)
-            time.sleep(SLEEP_BETWEEN_REQUESTS_SEC)
-
-            if html:
-                socials = extract_socials_from_html(html)
-                if not res.instagram and socials.get("instagram"):
-                    res.instagram = socials["instagram"]
-                    evidence.append("Instagram extracted from guessed website")
-                if not res.facebook and socials.get("facebook"):
-                    res.facebook = socials["facebook"]
-                    evidence.append("Facebook extracted from guessed website")
-
-    # 4) Search API fallback via router
-    if (not res.website) or (not res.instagram) or (not res.facebook):
-        profiles, ev, router_provider = find_profiles_via_search_router(name, city, country)
-        evidence += ev
-
-        if profiles.get("website") and not res.website:
-            res.website = ensure_http(profiles["website"])
-            if res.source == "none":
-                res.source = f"search_router:{router_provider}" if router_provider else "search_router"
-            res.confidence = max(res.confidence, 0.72)
-        
-        if profiles.get("instagram") and not res.instagram:
-            res.instagram = ensure_http(profiles["instagram"])
-            if res.source == "none":
-                res.source = f"search_router:{router_provider}" if router_provider else "search_router"
-            res.confidence = max(res.confidence, 0.72)
-
-        if profiles.get("facebook") and not res.facebook:
-            res.facebook = ensure_http(profiles["facebook"])
-            if res.source == "none":
-                res.source = f"search_router:{router_provider}" if router_provider else "search_router"
-            res.confidence = max(res.confidence, 0.72)
-
-        # If website came from router, scrape it too
-        if res.website:
-            html = fetch_url(res.website)
-            time.sleep(SLEEP_BETWEEN_REQUESTS_SEC)
-
-            if html:
-                socials = extract_socials_from_html(html)
-                if not res.instagram and socials.get("instagram"):
-                    res.instagram = socials["instagram"]
-                    evidence.append("Instagram extracted from router-found website")
-                if not res.facebook and socials.get("facebook"):
-                    res.facebook = socials["facebook"]
-                    evidence.append("Facebook extracted from router-found website")
-                    
-    # 6) Optional Google Places fallback
-    if not res.website and GOOGLE_PLACES_API_KEY:
-        wp = google_places_website(name, city, country)
-        time.sleep(SLEEP_BETWEEN_REQUESTS_SEC)
-
-        if wp:
-            res.website = ensure_http(wp)
-            res.source = "google_places"
-            res.confidence = max(res.confidence, 0.78)
-            evidence.append(f"Website from Google Places: {wp}")
-
-            html = fetch_url(res.website)
-            time.sleep(SLEEP_BETWEEN_REQUESTS_SEC)
-
-            if html:
-                socials = extract_socials_from_html(html)
-                if not res.instagram and socials.get("instagram"):
-                    res.instagram = socials["instagram"]
-                    evidence.append("Instagram extracted from Places website")
-                if not res.facebook and socials.get("facebook"):
-                    res.facebook = socials["facebook"]
-                    evidence.append("Facebook extracted from Places website")
-
-    # 6.5) Analyze website features
-    if res.website:
-        features = analyze_website_features(res.website)
-        res.menu_present = features["menu_present"]
-        res.booking_present = features["booking_present"]
-        res.delivery_present = features["delivery_present"]
-        res.data_capture_present = features["data_capture_present"]
-        res.contact_present = features["contact_present"]
-        evidence.append(
-            "Website features analyzed: "
-            f"menu={res.menu_present}, "
-            f"booking={res.booking_present}, "
-            f"delivery={res.delivery_present}, "
-            f"data_capture={res.data_capture_present}, "
-            f"contact={res.contact_present}"
-        )
-        
-    # 6.6) Validate that found links really belong to the restaurant
-    res.is_restaurant_match, res.non_restaurant_reason = validate_restaurant_match(
-        name=name,
-        city=city,
-        website=res.website,
-        instagram=res.instagram,
-        facebook=res.facebook
-    )
-
-    if not res.is_restaurant_match:
-        evidence.append(f"Non-restaurant or weak entity match: {res.non_restaurant_reason}")
-        res.needs_review = True
-        res.confidence = min(res.confidence, 0.45)
-
-    # 7) Final confidence adjustment
-    if res.website and (res.instagram or res.facebook):
-        res.confidence = min(1.0, res.confidence + 0.08)
-    elif res.website:
-        res.confidence = min(1.0, res.confidence + 0.03)
-
-    real_links_found = sum([
-        1 if res.website else 0,
-        1 if res.instagram else 0,
-        1 if res.facebook else 0
-    ])
-
-    if res.source == "guessed_domain":
-        if real_links_found == 1:
-            res.confidence = min(res.confidence, 0.55)
-        elif real_links_found == 2:
-            res.confidence = min(res.confidence, 0.75)
-        elif real_links_found == 3:
-            res.confidence = min(res.confidence, 0.88)
-
-    if real_links_found == 0:
-        res.confidence = min(res.confidence, 0.25)
-    elif real_links_found == 1:
-        res.confidence = min(res.confidence, 0.55)
-    elif real_links_found == 2:
-        res.confidence = min(res.confidence, 0.80)
-    else:
-        res.confidence = min(res.confidence, 1.00)
-
-    res.confidence = min(res.confidence, 0.95)
-
-    res.needs_review = (
-        (res.confidence < 0.65)
-        or (not res.website and not res.instagram and not res.facebook)
-    )
-
-    res.evidence = " | ".join(evidence)
-    return res
-
-
-# -----------------------------
-# Batch processing
-# -----------------------------
-def resolve_excel(input_path: str, output_path: str):
-    df = pd.read_excel(input_path)
-
-    required = {"name", "city", "country"}
-    missing = required - set(df.columns.str.lower())
-    if missing:
-        raise ValueError(f"Excel must contain columns: {sorted(required)} (case-insensitive). Missing: {sorted(missing)}")
-
-    df.rename(columns={c: c.lower() for c in df.columns}, inplace=True)
-
-    cache = load_cache()
-    out_rows = []
-
-    for _, row in df.iterrows():
-        name = str(row.get("name", "")).strip()
-        city = str(row.get("city", "")).strip()
-        country = str(row.get("country", "")).strip()
-
-        if not name or not city or not country:
-            out_rows.append({
-                **row.to_dict(),
-                "website": None,
-                "instagram": None,
-                "facebook": None,
-                "confidence": 0.0,
-                "source": "skipped",
-                "evidence": "Missing name/city/country",
-                "needs_review": True,
-                "status": "error",
-                "menu_present": False,
-                "booking_present": False,
-                "delivery_present": False,
-                "data_capture_present": False,
-                "contact_present": False,
-                "is_restaurant_match": False,
-                "non_restaurant_reason": "Missing name/city/country",
-            })
-            continue
-
-        key = cache_key(name, city, country)
-        if key in cache:
-            out_rows.append({**row.to_dict(), **cache[key]})
-            continue
-
-        result = resolve_one(name, city, country)
+        result = rr.resolve_one(name, city, country)
 
         status = "ok"
         if result.needs_review:
@@ -1036,44 +688,169 @@ def resolve_excel(input_path: str, output_path: str):
         if (
             ("timeout" in result.evidence.lower()) or
             ("request error" in result.evidence.lower())
-        ) and not (result.website or result.instagram or result.facebook):
+        ) and not (result.website or result.instagram or result.facebook or result.tiktok):
             status = "error"
 
-        record = {
-            "website": result.website,
-            "instagram": result.instagram,
-            "facebook": result.facebook,
-            "confidence": round(result.confidence, 3),
-            "source": result.source,
-            "evidence": result.evidence,
-            "needs_review": result.needs_review,
-            "status": status,
-            "menu_present": result.menu_present,
-            "booking_present": result.booking_present,
-            "delivery_present": result.delivery_present,
-            "data_capture_present": result.data_capture_present,
-            "contact_present": result.contact_present,
-            "is_restaurant_match": result.is_restaurant_match,
-            "non_restaurant_reason": result.non_restaurant_reason
-        }
-
+        record = rr.result_to_record(result, status)
         cache[key] = record
-        save_cache(cache)
+        rr.save_cache(cache)
 
-        out_rows.append({**row.to_dict(), **record})
-        time.sleep(SLEEP_BETWEEN_REQUESTS_SEC)
+    generated_at = now_utc_text()
+    generated_at_iso = now_utc_iso()
+
+    total_score = calculate_total_score(result)
+    confidence_total_percentage = round(float(result.confidence) * 100, 1)
+
+    hubspot_note_summary = generate_hubspot_note_summary(
+        result=result,
+        generated_at=generated_at,
+        total_score=total_score,
+        confidence_total_percentage=confidence_total_percentage,
+    )
+
+    pdf_filename = f"{safe_filename(result.name)}_{safe_filename(result.city)}.pdf"
+    pdf_path = str(Path(pdf_dir) / pdf_filename)
+    pdf_bytes = create_lead_summary_pdf_bytes(
+        result=result,
+        generated_at=generated_at,
+        total_score=total_score,
+        confidence_total_percentage=confidence_total_percentage,
+    )
+
+    with open(pdf_path, "wb") as f:
+        f.write(pdf_bytes)
+
+    hubspot_object_id = safe_str(
+        row.get("hubspot_object_id")
+        or row.get("hs_object_id")
+        or row.get("hubspot_id")
+        or row.get("record_id")
+    )
+    hubspot_object_type = safe_str(
+        row.get("hubspot_object_type")
+        or row.get("object_type")
+        or DEFAULT_HUBSPOT_OBJECT_TYPE
+    ).lower()
+
+    hubspot_file_id = ""
+    hubspot_note_id = ""
+    hubspot_status = "not_sent_to_hubspot"
+
+    if HUBSPOT_TOKEN and hubspot_object_id:
+        try:
+            uploaded = upload_pdf_to_hubspot(pdf_bytes, pdf_filename)
+            hubspot_file_id = str(uploaded.get("id", "") or uploaded.get("fileId", ""))
+
+            note_resp = create_hubspot_note_with_attachment(
+                hubspot_object_id=hubspot_object_id,
+                hubspot_object_type=hubspot_object_type,
+                note_body=hubspot_note_summary,
+                file_id=hubspot_file_id,
+                timestamp_iso=generated_at_iso,
+            )
+            hubspot_note_id = safe_str(note_resp.get("id"))
+            hubspot_status = "note_created_with_attachment"
+        except Exception as e:
+            hubspot_status = f"hubspot_error: {e}"
+    elif not HUBSPOT_TOKEN:
+        hubspot_status = "missing_hubspot_token"
+    else:
+        hubspot_status = "missing_hubspot_object_id"
+
+    final_record = dict(record)
+    final_record["pdf_summary_path"] = pdf_path
+    final_record["hubspot_note_summary"] = hubspot_note_summary
+    final_record["hubspot_file_id"] = hubspot_file_id
+    final_record["hubspot_note_id"] = hubspot_note_id
+    final_record["total_score"] = total_score
+    final_record["confidence_total_percentage"] = confidence_total_percentage
+    final_record["generated_at"] = generated_at
+    final_record["hubspot_status"] = hubspot_status
+    final_record["hubspot_object_id"] = hubspot_object_id
+    final_record["hubspot_object_type"] = hubspot_object_type
+
+    return {**row, **final_record}
+
+
+# =========================================================
+# MAIN JOB
+# =========================================================
+def validate_env() -> None:
+    required = {
+        "GOOGLE_SERVICE_ACCOUNT_JSON": GOOGLE_SERVICE_ACCOUNT_JSON,
+        "GOOGLE_SHEET_ID": GOOGLE_SHEET_ID,
+        "GOOGLE_SHEET_NAME": GOOGLE_SHEET_NAME,
+    }
+    missing = [k for k, v in required.items() if not v]
+    if missing:
+        raise ValueError(f"Missing required environment variables: {missing}")
+
+
+def main() -> None:
+    validate_env()
+
+    work_dir = Path(WORK_DIR)
+    pdf_dir = ensure_dir(str(work_dir / PDF_DIR))
+    local_output_xlsx = str(work_dir / LOCAL_OUTPUT_XLSX)
+
+    print("Starting Render job...")
+    print(f"Google sheet id: {GOOGLE_SHEET_ID}")
+    print(f"Source sheet: {GOOGLE_SHEET_NAME}")
+    print(f"Output sheet: {GOOGLE_OUTPUT_SHEET_NAME}")
+    print(f"PDF dir: {pdf_dir}")
+
+    service = get_google_sheets_service()
+    df = read_sheet_as_dataframe(service, GOOGLE_SHEET_ID, GOOGLE_SHEET_NAME)
+
+    if df.empty:
+        print("Source Google Sheet is empty. Nothing to process.")
+        return
+
+    required_cols = {"name", "city", "country"}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required sheet columns: {sorted(missing_cols)}")
+
+    cache = rr.load_cache()
+    out_rows: List[Dict[str, Any]] = []
+
+    processed_count = 0
+    for _, row in df.iterrows():
+        row_dict = row.to_dict()
+
+        if ONLY_PROCESS_ROWS_WITHOUT_STATUS and safe_str(row_dict.get("hubspot_status")):
+            out_rows.append(row_dict)
+            continue
+
+        try:
+            processed = process_row(row_dict, cache, pdf_dir)
+        except Exception as e:
+            processed = dict(row_dict)
+            processed["hubspot_status"] = f"row_processing_error: {e}"
+            processed["generated_at"] = now_utc_text()
+
+        out_rows.append(processed)
+        processed_count += 1
+
+        if processed_count % max(1, HUBSPOT_BATCH_LIMIT) == 0:
+            time.sleep(REQUEST_DELAY)
+
+        time.sleep(REQUEST_DELAY)
 
     out_df = pd.DataFrame(out_rows)
-    out_df.to_excel(output_path, index=False)
-    print(f"Saved: {output_path}")
+    out_df.to_excel(local_output_xlsx, index=False)
+
+    write_dataframe_to_sheet(
+        service=service,
+        spreadsheet_id=GOOGLE_SHEET_ID,
+        sheet_name=GOOGLE_OUTPUT_SHEET_NAME,
+        df=out_df,
+    )
+
+    print(f"Saved local Excel: {local_output_xlsx}")
+    print(f"Updated Google output sheet: {GOOGLE_OUTPUT_SHEET_NAME}")
+    print("Render job completed successfully.")
 
 
 if __name__ == "__main__":
-    import argparse
-
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True, help="Path to input Excel (.xlsx)")
-    ap.add_argument("--output", required=True, help="Path to output Excel (.xlsx)")
-    args = ap.parse_args()
-
-    resolve_excel(args.input, args.output)
+    main()

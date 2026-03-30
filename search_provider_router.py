@@ -64,7 +64,7 @@ class ProviderPolicy:
 @dataclass
 class RouterConfig:
     providers_order: List[str] = field(
-        default_factory=lambda: ["serper", "serpapi", "tavily"]
+        default_factory=lambda: ["serpapi", "serper", "tavily"]
     )
     policy: ProviderPolicy = field(default_factory=ProviderPolicy)
     cache_ttl_sec: int = CACHE_TTL_SEC

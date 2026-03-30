@@ -47,6 +47,8 @@ HEADERS = [
     "website",
     "instagram",
     "facebook",
+    "tiktok",
+    "tiktok_present",
     "menu_present",
     "booking_present",
     "delivery_present",
@@ -206,6 +208,8 @@ def upsert_company_result(
             result.website or "",
             result.instagram or "",
             result.facebook or "",
+            result.tiktok or "",
+            str(result.tiktok_present).lower(),
             str(result.menu_present).lower(),
             str(result.booking_present).lower(),
             str(result.delivery_present).lower(),
@@ -228,6 +232,8 @@ def upsert_company_result(
             name,
             city,
             country,
+            "",
+            "",
             "",
             "",
             "",
@@ -350,7 +356,7 @@ def build_note_body(result, name: str, city: str, country: str) -> str:
         status = "error"
 
     no_profile_message = ""
-    if not (result.website or result.instagram or result.facebook):
+    if not (result.website or result.instagram or result.facebook or result.tiktok):
         no_profile_message = (
             "<b>Search Result:</b> No official website or social profiles were found "
             "after trying multiple discovery methods (OSM, guessed domain, and search providers).<br><br>"
@@ -367,6 +373,7 @@ def build_note_body(result, name: str, city: str, country: str) -> str:
         f"<b>Website:</b> {html_link(result.website, 'Open website')}<br>"
         f"<b>Instagram:</b> {html_link(result.instagram, 'Open Instagram')}<br>"
         f"<b>Facebook:</b> {html_link(result.facebook, 'Open Facebook')}<br><br>"
+        f"<b>TikTok:</b> {html_link(result.tiktok, 'Open TikTok')}<br><br>"
         f"<b>Menu online:</b> {bool_to_yes_no(result.menu_present)}<br>"
         f"<b>Booking online:</b> {bool_to_yes_no(result.booking_present)}<br>"
         f"<b>Delivery:</b> {bool_to_yes_no(result.delivery_present)}<br>"
@@ -431,6 +438,7 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
         f"Website: {chunk_long_text(result.website or 'Not found')}",
         f"Instagram: {chunk_long_text(result.instagram or 'Not found')}",
         f"Facebook: {chunk_long_text(result.facebook or 'Not found')}",
+        f"TikTok: {chunk_long_text(result.tiktok or 'Not found')}",
         "",
         f"Menu online: {bool_to_yes_no(result.menu_present)}",
         f"Booking online: {bool_to_yes_no(result.booking_present)}",
