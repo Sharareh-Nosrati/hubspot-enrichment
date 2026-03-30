@@ -13,7 +13,6 @@ from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 
 
-
 load_dotenv()
 
 HUBSPOT_TOKEN = os.getenv("HUBSPOT_TOKEN", "")
@@ -66,7 +65,17 @@ HEADERS = [
 ]
 
 
+def resolve_one(name: str, city: str, country: str):
+    """
+    Safe bridge for the resolver function.
+    """
+    if hasattr(rr, "resolve_one"):
+        return rr.resolve_one(name, city, country)
 
+    raise AttributeError(
+        "resolve_restaurants.py does not contain resolve_one(name, city, country). "
+        "You need to restore that function in resolve_restaurants.py."
+    )
 
 
 def hs_headers() -> Dict[str, str]:
@@ -129,7 +138,7 @@ def get_worksheet():
     if not existing_headers:
         ws.append_row(HEADERS)
     elif existing_headers != HEADERS:
-        ws.update(values=[HEADERS], range_name="A1:X1")
+        ws.update("A1:X1", [HEADERS])
 
     _worksheet = ws
     return _worksheet
@@ -260,11 +269,7 @@ def upsert_company_result(
 
     existing_row = find_row_by_company_id(ws, str(company_id))
     if existing_row:
-        ws.update(
-            values=[row],
-            range_name=f"A{existing_row}:X{existing_row}",
-            value_input_option="USER_ENTERED"
-        )
+        ws.update(f"A{existing_row}:X{existing_row}", [row], value_input_option="USER_ENTERED")
     else:
         ws.append_row(row, value_input_option="USER_ENTERED")
 
