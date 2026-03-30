@@ -11,7 +11,7 @@ import gspread
 from fpdf import FPDF
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
-from resolve_restaurants import resolve_one
+
 
 
 load_dotenv()
