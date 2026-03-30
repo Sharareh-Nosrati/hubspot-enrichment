@@ -1,856 +1,653 @@
-from __future__ import annotations
-
-import io
 import os
-import re
-import json
 import time
+import json
+import tempfile
+import traceback
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 
 import requests
-import pandas as pd
+import gspread
+from fpdf import FPDF
 from dotenv import load_dotenv
-
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import mm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from google.oauth2.service_account import Credentials
 
 import resolve_restaurants as rr
 
 load_dotenv()
 
-
-# =========================================================
-# ENV CONFIG
-# =========================================================
-GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
-GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "")
-GOOGLE_OUTPUT_SHEET_NAME = os.getenv("GOOGLE_OUTPUT_SHEET_NAME", f"{GOOGLE_SHEET_NAME}_output" if GOOGLE_SHEET_NAME else "output")
-
 HUBSPOT_TOKEN = os.getenv("HUBSPOT_TOKEN", "")
-HUBSPOT_BATCH_LIMIT = int(os.getenv("HUBSPOT_BATCH_LIMIT", "50"))
-REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "1.0"))
+BASE_URL = "https://api.hubapi.com"
 
-# Optional Render/runtime paths
-WORK_DIR = os.getenv("WORK_DIR", ".")
-PDF_DIR = os.getenv("PDF_DIR", "generated_pdfs")
-LOCAL_OUTPUT_XLSX = os.getenv("LOCAL_OUTPUT_XLSX", "output_with_pdf.xlsx")
+OBJECT_TYPE = "contacts"
 
-# Optional HubSpot defaults
-DEFAULT_HUBSPOT_OBJECT_TYPE = os.getenv("DEFAULT_HUBSPOT_OBJECT_TYPE", "contacts")
-HUBSPOT_FILE_FOLDER_PATH = os.getenv("HUBSPOT_FILE_FOLDER_PATH", "/online-presence-reports")
-HUBSPOT_FILE_ACCESS = os.getenv("HUBSPOT_FILE_ACCESS", "PRIVATE")
+PROP_CITY = "city"
+PROP_COUNTRY = "country"
 
-# Optional row filter
-ONLY_PROCESS_ROWS_WITHOUT_STATUS = os.getenv("ONLY_PROCESS_ROWS_WITHOUT_STATUS", "false").lower() == "true"
+POLL_LIMIT = int(os.getenv("HUBSPOT_BATCH_LIMIT", "2"))
+SLEEP_BETWEEN_RECORDS = float(os.getenv("REQUEST_DELAY", "1"))
 
-# Google scopes
-GOOGLE_SCOPES = [
+GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "")
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
+
+_gspread_client = None
+_worksheet = None
+
+SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+
+HEADERS = [
+    "hubspot_company_id",
+    "name",
+    "city",
+    "country",
+    "website",
+    "instagram",
+    "facebook",
+    "tiktok",
+    "tiktok_present",
+    "menu_present",
+    "booking_present",
+    "delivery_present",
+    "data_capture_present",
+    "contact_present",
+    "confidence",
+    "source",
+    "status",
+    "needs_review",
+    "is_restaurant_match",
+    "non_restaurant_reason",
+    "evidence",
+    "last_checked",
+    "hubspot_file_id",
+    "pdf_url"
 ]
 
 
-# =========================================================
-# GENERIC HELPERS
-# =========================================================
-def now_utc_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def now_utc_text() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-
-def safe_str(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def yn(value: bool) -> str:
-    return "Yes" if bool(value) else "No"
-
-
-def pct_from_score(value: Optional[float]) -> str:
-    try:
-        return f"{round(float(value) * 100, 1)}%"
-    except Exception:
-        return "-"
-
-
-def value_or_dash(value: Any) -> str:
-    v = safe_str(value)
-    return v if v else "-"
-
-
-def safe_filename(value: str, max_len: int = 90) -> str:
-    value = safe_str(value)
-    value = re.sub(r"[^\w\s\-]", "", value, flags=re.UNICODE)
-    value = re.sub(r"\s+", "_", value).strip("_")
-    if not value:
-        value = "lead"
-    return value[:max_len]
-
-
-def ensure_dir(path: str) -> str:
-    Path(path).mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def unique_keep_order(items: List[str]) -> List[str]:
-    seen = set()
-    out: List[str] = []
-    for item in items:
-        if not item:
-            continue
-        if item not in seen:
-            seen.add(item)
-            out.append(item)
-    return out
-
-
-# =========================================================
-# GOOGLE SHEETS
-# =========================================================
-def get_google_sheets_service():
-    if not GOOGLE_SERVICE_ACCOUNT_JSON:
-        raise ValueError("Missing GOOGLE_SERVICE_ACCOUNT_JSON")
-    if not GOOGLE_SHEET_ID:
-        raise ValueError("Missing GOOGLE_SHEET_ID")
-
-    try:
-        info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON: {e}") from e
-
-    credentials = service_account.Credentials.from_service_account_info(
-        info,
-        scopes=GOOGLE_SCOPES,
-    )
-    return build("sheets", "v4", credentials=credentials, cache_discovery=False)
-
-
-def ensure_sheet_exists(service, spreadsheet_id: str, sheet_name: str) -> None:
-    meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-    existing_names = {
-        s["properties"]["title"]
-        for s in meta.get("sheets", [])
-    }
-
-    if sheet_name in existing_names:
-        return
-
-    body = {
-        "requests": [
-            {
-                "addSheet": {
-                    "properties": {
-                        "title": sheet_name
-                    }
-                }
-            }
-        ]
-    }
-    service.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body=body,
-    ).execute()
-
-
-def read_sheet_as_dataframe(service, spreadsheet_id: str, sheet_name: str) -> pd.DataFrame:
-    result = service.spreadsheets().values().get(
-        spreadsheetId=spreadsheet_id,
-        range=sheet_name,
-    ).execute()
-
-    values = result.get("values", [])
-    if not values:
-        return pd.DataFrame()
-
-    headers = [safe_str(x).lower() for x in values[0]]
-    rows = values[1:]
-
-    normalized_rows: List[List[str]] = []
-    for row in rows:
-        row_extended = list(row) + [""] * (len(headers) - len(row))
-        normalized_rows.append(row_extended[:len(headers)])
-
-    df = pd.DataFrame(normalized_rows, columns=headers)
-    return df
-
-
-def write_dataframe_to_sheet(service, spreadsheet_id: str, sheet_name: str, df: pd.DataFrame) -> None:
-    ensure_sheet_exists(service, spreadsheet_id, sheet_name)
-
-    values: List[List[Any]] = [list(df.columns)]
-    for _, row in df.iterrows():
-        values.append([row[col] for col in df.columns])
-
-    clear_range = f"{sheet_name}!A:ZZ"
-    service.spreadsheets().values().clear(
-        spreadsheetId=spreadsheet_id,
-        range=clear_range,
-        body={},
-    ).execute()
-
-    service.spreadsheets().values().update(
-        spreadsheetId=spreadsheet_id,
-        range=f"{sheet_name}!A1",
-        valueInputOption="RAW",
-        body={"values": values},
-    ).execute()
-
-
-# =========================================================
-# BUSINESS SUMMARY HELPERS
-# =========================================================
-def extra_directory_links(result: rr.ResolveResult) -> List[str]:
-    all_links = rr.json_list(result.directory_links_json)
-    known = {
-        result.google_maps_url,
-        result.justeat_url,
-        result.deliveroo_url,
-        result.thefork_url,
-        result.tripadvisor_url,
-        result.glovo_url,
-        result.restaurantguru_url,
-        result.opentable_url,
-        result.quandoo_url,
-    }
-    return [x for x in all_links if x and x not in known]
-
-
-def website_search_candidates_with_scores(
-    result: rr.ResolveResult,
-    max_items: int = 5,
-) -> List[Dict[str, Any]]:
-    urls = rr.json_list(result.official_website_candidates_json)
-    urls = unique_keep_order(urls)[:max_items]
-
-    scored: List[Dict[str, Any]] = []
-    for url in urls:
-        try:
-            details = rr.website_validation_details(result.name, result.city, url)
-            scored.append({
-                "url": url,
-                "score": float(details.get("score", 0.0)),
-                "is_valid": bool(details.get("is_valid", False)),
-                "reason": details.get("reason", ""),
-            })
-        except Exception as e:
-            scored.append({
-                "url": url,
-                "score": 0.0,
-                "is_valid": False,
-                "reason": f"validation_error: {e}",
-            })
-
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored
-
-
-def calculate_total_score(result: rr.ResolveResult) -> int:
-    score = 0.0
-
-    if result.website:
-        score += 24
-    if result.instagram:
-        score += 8
-    if result.facebook:
-        score += 8
-    if result.tiktok:
-        score += 8
-    if result.google_maps_url:
-        score += 12
-    if result.threads:
-        score += 4
-    if result.x:
-        score += 4
-    if result.youtube:
-        score += 4
-
-    if result.menu_present:
-        score += 6
-    if result.booking_present:
-        score += 5
-    if result.delivery_present:
-        score += 5
-    if result.data_capture_present:
-        score += 4
-    if result.contact_present:
-        score += 5
-
-    if result.thefork_url:
-        score += 4
-    if result.tripadvisor_url:
-        score += 4
-    if result.opentable_url:
-        score += 3
-    if result.justeat_url:
-        score += 2
-    if result.deliveroo_url:
-        score += 2
-    if result.glovo_url:
-        score += 2
-    if result.restaurantguru_url:
-        score += 1
-    if result.quandoo_url:
-        score += 1
-
-    try:
-        score += min(max(float(result.website_validation_score), 0.0), 1.0) * 6
-    except Exception:
-        pass
-
-    return max(0, min(100, round(score)))
-
-
-def generate_hubspot_note_summary(
-    result: rr.ResolveResult,
-    generated_at: str,
-    total_score: int,
-    confidence_total_percentage: float,
-) -> str:
-    search_candidates = website_search_candidates_with_scores(result, max_items=5)
-    search_lines = []
-    for item in search_candidates:
-        search_lines.append(f"- Website: {item['url']}, {round(item['score'] * 100, 1)}%")
-
-    extra_links = extra_directory_links(result)
-    extra_links_text = "\n".join([f"- {x}" for x in extra_links[:10]]) if extra_links else "-"
-
-    note = f"""
-Online Presence Summary
-
-Lead: {result.name}
-Website: {result.website or "-"}
-Generated: {generated_at}
-Total score: {total_score}/100
-Confidence total percentage: {round(confidence_total_percentage, 1)}%
-
-Search links (when website is missing):
-{chr(10).join(search_lines) if search_lines else "-"}
-
-Website checks:
-- Menu: {yn(result.menu_present)}
-- Booking: {yn(result.booking_present)}
-- Delivery: {yn(result.delivery_present)}
-- Data capture: {yn(result.data_capture_present)}
-- Contact info: {yn(result.contact_present)}
-- Website creator: {result.website_creator or result.website_platform or "-"}
-
-Presence links:
-- Instagram: {result.instagram or "-"}, {pct_from_score(result.instagram_score)}
-- Facebook: {result.facebook or "-"}, {pct_from_score(result.facebook_score)}
-- TikTok: {result.tiktok or "-"}, {pct_from_score(result.tiktok_score)}
-- Google Maps: {result.google_maps_url or "-"}, {pct_from_score(0.85 if result.google_maps_url else 0.0)}
-- Threads: {result.threads or "-"}, {pct_from_score(result.threads_score)}
-- X: {result.x or "-"}, {pct_from_score(result.x_score)}
-
-Other general links:
-- TheFork: {result.thefork_url or "-"}
-- TripAdvisor: {result.tripadvisor_url or "-"}
-- OpenTable: {result.opentable_url or "-"}
-- Extra links:
-{extra_links_text}
-""".strip()
-
-    return note
-
-
-# =========================================================
-# PDF GENERATION
-# =========================================================
-def build_pdf_styles():
-    styles = getSampleStyleSheet()
-
-    styles.add(ParagraphStyle(
-        name="DocTitle",
-        parent=styles["Heading1"],
-        fontName="Helvetica-Bold",
-        fontSize=19,
-        leading=23,
-        textColor=colors.HexColor("#17324D"),
-        spaceAfter=8,
-    ))
-    styles.add(ParagraphStyle(
-        name="Meta",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=9.5,
-        leading=12,
-        textColor=colors.HexColor("#5A6470"),
-        spaceAfter=2,
-    ))
-    styles.add(ParagraphStyle(
-        name="SectionTitle",
-        parent=styles["Heading2"],
-        fontName="Helvetica-Bold",
-        fontSize=11.5,
-        leading=14,
-        textColor=colors.HexColor("#17324D"),
-        spaceBefore=7,
-        spaceAfter=5,
-    ))
-    styles.add(ParagraphStyle(
-        name="Cell",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=8.8,
-        leading=11,
-        textColor=colors.black,
-        alignment=TA_LEFT,
-    ))
-    styles.add(ParagraphStyle(
-        name="LinkCell",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=8.5,
-        leading=10.8,
-        textColor=colors.HexColor("#0B57D0"),
-        alignment=TA_LEFT,
-    ))
-    return styles
-
-
-def make_table(rows: List[List[Any]], col_widths: List[float]) -> Table:
-    tbl = Table(rows, colWidths=col_widths, repeatRows=1)
-    tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EAF1F8")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#17324D")),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("LEADING", (0, 0), (-1, -1), 11),
-        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD4E1")),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FBFE")]),
-    ]))
-    return tbl
-
-
-def create_lead_summary_pdf_bytes(
-    result: rr.ResolveResult,
-    generated_at: str,
-    total_score: int,
-    confidence_total_percentage: float,
-) -> bytes:
-    styles = build_pdf_styles()
-    buffer = io.BytesIO()
-
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        leftMargin=15 * mm,
-        rightMargin=15 * mm,
-        topMargin=15 * mm,
-        bottomMargin=15 * mm,
-        title=f"Online Presence Summary - {result.name}",
+def resolve_one(name: str, city: str, country: str):
+    """
+    Safe bridge for the resolver function.
+    """
+    if hasattr(rr, "resolve_one"):
+        return rr.resolve_one(name, city, country)
+
+    raise AttributeError(
+        "resolve_restaurants.py does not contain resolve_one(name, city, country). "
+        "You need to restore that function in resolve_restaurants.py."
     )
 
-    story = []
 
-    story.append(Paragraph("Online Presence Summary", styles["DocTitle"]))
-    story.append(Paragraph(f"<b>Lead:</b> {value_or_dash(result.name)}", styles["Meta"]))
-    story.append(Paragraph(f"<b>Website:</b> {value_or_dash(result.website)}", styles["Meta"]))
-    story.append(Paragraph(f"<b>Generated:</b> {generated_at}", styles["Meta"]))
-    story.append(Spacer(1, 6))
-
-    top_rows = [
-        [Paragraph("Metric", styles["Cell"]), Paragraph("Value", styles["Cell"])],
-        [Paragraph("Total score", styles["Cell"]), Paragraph(f"{total_score}/100", styles["Cell"])],
-        [Paragraph("Confidence total percentage", styles["Cell"]), Paragraph(f"{round(confidence_total_percentage, 1)}%", styles["Cell"])],
-    ]
-    story.append(make_table(top_rows, [62 * mm, 108 * mm]))
-    story.append(Spacer(1, 8))
-
-    if not result.website:
-        search_candidates = website_search_candidates_with_scores(result, max_items=5)
-        story.append(Paragraph("Search links (when website is missing)", styles["SectionTitle"]))
-        search_rows = [[Paragraph("Website", styles["Cell"]), Paragraph("Confidence", styles["Cell"])]]
-        if search_candidates:
-            for item in search_candidates:
-                search_rows.append([
-                    Paragraph(value_or_dash(item["url"]), styles["LinkCell"]),
-                    Paragraph(f"{round(item['score'] * 100, 1)}%", styles["Cell"]),
-                ])
-        else:
-            search_rows.append([Paragraph("-", styles["Cell"]), Paragraph("-", styles["Cell"])])
-        story.append(make_table(search_rows, [138 * mm, 32 * mm]))
-        story.append(Spacer(1, 8))
-
-    story.append(Paragraph("Website checks", styles["SectionTitle"]))
-    website_rows = [
-        [Paragraph("Check", styles["Cell"]), Paragraph("Value", styles["Cell"])],
-        [Paragraph("Menu", styles["Cell"]), Paragraph(yn(result.menu_present), styles["Cell"])],
-        [Paragraph("Booking", styles["Cell"]), Paragraph(yn(result.booking_present), styles["Cell"])],
-        [Paragraph("Delivery", styles["Cell"]), Paragraph(yn(result.delivery_present), styles["Cell"])],
-        [Paragraph("Data capture", styles["Cell"]), Paragraph(yn(result.data_capture_present), styles["Cell"])],
-        [Paragraph("Contact info", styles["Cell"]), Paragraph(yn(result.contact_present), styles["Cell"])],
-        [Paragraph("Website creator", styles["Cell"]), Paragraph(value_or_dash(result.website_creator or result.website_platform), styles["Cell"])],
-    ]
-    story.append(make_table(website_rows, [60 * mm, 110 * mm]))
-    story.append(Spacer(1, 8))
-
-    story.append(Paragraph("Presence links", styles["SectionTitle"]))
-    presence_rows = [
-        [Paragraph("Channel", styles["Cell"]), Paragraph("Link", styles["Cell"]), Paragraph("Confidence", styles["Cell"])],
-        [Paragraph("Instagram", styles["Cell"]), Paragraph(value_or_dash(result.instagram), styles["LinkCell"]), Paragraph(pct_from_score(result.instagram_score), styles["Cell"])],
-        [Paragraph("Facebook", styles["Cell"]), Paragraph(value_or_dash(result.facebook), styles["LinkCell"]), Paragraph(pct_from_score(result.facebook_score), styles["Cell"])],
-        [Paragraph("TikTok", styles["Cell"]), Paragraph(value_or_dash(result.tiktok), styles["LinkCell"]), Paragraph(pct_from_score(result.tiktok_score), styles["Cell"])],
-        [Paragraph("Google Maps", styles["Cell"]), Paragraph(value_or_dash(result.google_maps_url), styles["LinkCell"]), Paragraph(pct_from_score(0.85 if result.google_maps_url else 0.0), styles["Cell"])],
-        [Paragraph("Threads", styles["Cell"]), Paragraph(value_or_dash(result.threads), styles["LinkCell"]), Paragraph(pct_from_score(result.threads_score), styles["Cell"])],
-        [Paragraph("X", styles["Cell"]), Paragraph(value_or_dash(result.x), styles["LinkCell"]), Paragraph(pct_from_score(result.x_score), styles["Cell"])],
-    ]
-    story.append(make_table(presence_rows, [28 * mm, 112 * mm, 30 * mm]))
-    story.append(Spacer(1, 8))
-
-    story.append(Paragraph("Other general links", styles["SectionTitle"]))
-    extra_links = extra_directory_links(result)
-    extra_links_text = "<br/>".join(extra_links[:12]) if extra_links else "-"
-
-    other_rows = [
-        [Paragraph("Item", styles["Cell"]), Paragraph("Value", styles["Cell"])],
-        [Paragraph("TheFork", styles["Cell"]), Paragraph(value_or_dash(result.thefork_url), styles["LinkCell"])],
-        [Paragraph("TripAdvisor", styles["Cell"]), Paragraph(value_or_dash(result.tripadvisor_url), styles["LinkCell"])],
-        [Paragraph("OpenTable", styles["Cell"]), Paragraph(value_or_dash(result.opentable_url), styles["LinkCell"])],
-        [Paragraph("Extra links", styles["Cell"]), Paragraph(extra_links_text, styles["LinkCell"])],
-    ]
-    story.append(make_table(other_rows, [42 * mm, 128 * mm]))
-
-    doc.build(story)
-    pdf_bytes = buffer.getvalue()
-    buffer.close()
-    return pdf_bytes
-
-
-# =========================================================
-# HUBSPOT API
-# =========================================================
-def hubspot_headers() -> Dict[str, str]:
+def hs_headers() -> Dict[str, str]:
     if not HUBSPOT_TOKEN:
-        raise ValueError("Missing HUBSPOT_TOKEN")
+        raise ValueError("HUBSPOT_TOKEN is missing.")
     return {
         "Authorization": f"Bearer {HUBSPOT_TOKEN}",
+        "Content-Type": "application/json"
     }
 
 
-def get_note_association_type_id(to_object_type: str) -> int:
-    """
-    Try to fetch dynamically.
-    Fall back to default contact association type 202 if object is contacts.
-    """
-    url = f"https://api.hubapi.com/crm/v4/associations/notes/{to_object_type}/labels"
-    resp = requests.get(url, headers=hubspot_headers(), timeout=30)
+def get_gspread_client():
+    global _gspread_client
 
-    if resp.ok:
-        data = resp.json()
-        results = data.get("results", [])
-        if results:
-            for item in results:
-                if item.get("category") == "HUBSPOT_DEFINED":
-                    type_id = item.get("typeId")
-                    if type_id:
-                        return int(type_id)
-            type_id = results[0].get("typeId")
-            if type_id:
-                return int(type_id)
+    if _gspread_client is not None:
+        return _gspread_client
 
-    if to_object_type == "contacts":
-        return 202
+    google_service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
-    raise RuntimeError(f"Could not determine note associationTypeId for object type '{to_object_type}'")
+    print("DEBUG GOOGLE_SERVICE_ACCOUNT_JSON exists:", bool(google_service_account_json))
+    print("DEBUG GOOGLE_SHEET_NAME:", repr(GOOGLE_SHEET_NAME))
+    print("DEBUG GOOGLE_SHEET_ID:", repr(GOOGLE_SHEET_ID))
 
+    if not google_service_account_json:
+        raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON is missing.")
 
-def upload_pdf_to_hubspot(pdf_bytes: bytes, filename: str) -> Dict[str, Any]:
-    url = "https://api.hubapi.com/files/v3/files"
+    try:
+        service_account_info = json.loads(google_service_account_json)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON: {e}")
 
-    files = {
-        "file": (filename, pdf_bytes, "application/pdf"),
-    }
-    data = {
-        "folderPath": HUBSPOT_FILE_FOLDER_PATH,
-        "fileName": filename,
-        "options": json.dumps({
-            "access": HUBSPOT_FILE_ACCESS,
-            "duplicateValidationStrategy": "RETURN_EXISTING",
-            "duplicateValidationScope": "ENTIRE_PORTAL",
-        }),
-    }
-
-    resp = requests.post(
-        url,
-        headers=hubspot_headers(),
-        files=files,
-        data=data,
-        timeout=60,
+    creds = Credentials.from_service_account_info(
+        service_account_info,
+        scopes=SCOPES
     )
-    resp.raise_for_status()
-    return resp.json()
+
+    _gspread_client = gspread.authorize(creds)
+    return _gspread_client
 
 
-def create_hubspot_note_with_attachment(
-    hubspot_object_id: str,
-    hubspot_object_type: str,
-    note_body: str,
-    file_id: str,
-    timestamp_iso: str,
-) -> Dict[str, Any]:
-    association_type_id = get_note_association_type_id(hubspot_object_type)
+def get_worksheet():
+    global _worksheet
 
-    url = "https://api.hubapi.com/crm/v3/objects/notes"
-    body = {
-        "associations": [
-            {
-                "to": {"id": str(hubspot_object_id)},
-                "types": [
-                    {
-                        "associationCategory": "HUBSPOT_DEFINED",
-                        "associationTypeId": association_type_id,
-                    }
-                ],
-            }
-        ],
-        "properties": {
-            "hs_note_body": note_body,
-            "hs_timestamp": timestamp_iso,
-            "hs_attachment_ids": str(file_id),
-        },
-    }
+    if _worksheet is not None:
+        return _worksheet
 
-    resp = requests.post(
-        url,
-        headers={**hubspot_headers(), "Content-Type": "application/json"},
-        json=body,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    client = get_gspread_client()
 
-
-# =========================================================
-# CACHE / RECORD REBUILD
-# =========================================================
-def resolve_result_from_record(name: str, city: str, country: str, record: Dict[str, Any]) -> rr.ResolveResult:
-    result = rr.ResolveResult(name=name, city=city, country=country)
-    for field_name in result.__dataclass_fields__.keys():
-        if field_name in record:
-            setattr(result, field_name, record[field_name])
-    return result
-
-
-# =========================================================
-# PROCESS ONE ROW
-# =========================================================
-def process_row(row: Dict[str, Any], cache: Dict[str, Any], pdf_dir: str) -> Dict[str, Any]:
-    name = safe_str(row.get("name", ""))
-    city = safe_str(row.get("city", ""))
-    country = safe_str(row.get("country", ""))
-
-    if not name or not city or not country:
-        empty = rr.build_empty_record(row)
-        empty["pdf_summary_path"] = ""
-        empty["hubspot_note_summary"] = ""
-        empty["hubspot_file_id"] = ""
-        empty["hubspot_note_id"] = ""
-        empty["total_score"] = 0
-        empty["confidence_total_percentage"] = 0.0
-        empty["generated_at"] = now_utc_text()
-        empty["hubspot_status"] = "skipped_missing_required_fields"
-        return empty
-
-    key = rr.cache_key(name, city, country)
-
-    if key in cache:
-        record = cache[key]
-        result = resolve_result_from_record(name, city, country, record)
-        status = record.get("status", "ok")
+    if GOOGLE_SHEET_ID:
+        sheet = client.open_by_key(GOOGLE_SHEET_ID)
+    elif GOOGLE_SHEET_NAME:
+        sheet = client.open(GOOGLE_SHEET_NAME)
     else:
-        result = rr.resolve_one(name, city, country)
+        raise ValueError("Either GOOGLE_SHEET_ID or GOOGLE_SHEET_NAME must be set.")
 
+    ws = sheet.sheet1
+
+    existing_headers = ws.row_values(1)
+
+    if not existing_headers:
+        ws.append_row(HEADERS)
+    elif existing_headers != HEADERS:
+        ws.update("A1:X1", [HEADERS])
+
+    _worksheet = ws
+    return _worksheet
+
+
+def get_existing_company_ids(ws) -> set[str]:
+    values = ws.col_values(1)
+    return {v for v in values[1:] if v}
+
+
+def find_row_by_company_id(ws, company_id: str):
+    if ws is None:
+        raise ValueError("Worksheet is None in find_row_by_company_id().")
+
+    values = ws.get_all_values()
+    for idx, row in enumerate(values[1:], start=2):
+        if row and row[0] == str(company_id):
+            return idx
+    return None
+
+
+def already_processed(existing_ids: set[str], company_id: str) -> bool:
+    return str(company_id) in existing_ids
+
+
+def hubspot_get_signed_file_url(file_id: str) -> Optional[str]:
+    url = f"{BASE_URL}/files/v3/files/{file_id}/signed-url"
+
+    r = requests.get(url, headers=hs_headers(), timeout=30)
+
+    if not r.ok:
+        print("HubSpot signed URL error:")
+        print(r.status_code)
+        print(r.text)
+        return None
+
+    data = r.json()
+    return data.get("url")
+
+
+def upsert_company_result(
+    ws,
+    company_id: str,
+    name: str,
+    city: str,
+    country: str,
+    result=None,
+    hubspot_file_id: str = "",
+    pdf_url: str = "",
+    status_override: str = "",
+    needs_review_override: str = "",
+    evidence_override: str = ""
+) -> None:
+    pdf_cell_value = pdf_url or ""
+
+    if result is not None:
         status = "ok"
+        evidence_text = result.evidence or ""
+
         if result.needs_review:
             status = "needs_review"
 
         if (
-            ("timeout" in result.evidence.lower()) or
-            ("request error" in result.evidence.lower())
-        ) and not (result.website or result.instagram or result.facebook or result.tiktok):
+            ("timeout" in evidence_text.lower()) or
+            ("request error" in evidence_text.lower())
+        ) and not (result.website or result.instagram or result.facebook):
             status = "error"
 
-        record = rr.result_to_record(result, status)
-        cache[key] = record
-        rr.save_cache(cache)
+        if status_override:
+            status = status_override
 
-    generated_at = now_utc_text()
-    generated_at_iso = now_utc_iso()
+        needs_review_value = needs_review_override or str(result.needs_review).lower()
+        evidence_value = evidence_override or evidence_text
 
-    total_score = calculate_total_score(result)
-    confidence_total_percentage = round(float(result.confidence) * 100, 1)
-
-    hubspot_note_summary = generate_hubspot_note_summary(
-        result=result,
-        generated_at=generated_at,
-        total_score=total_score,
-        confidence_total_percentage=confidence_total_percentage,
-    )
-
-    pdf_filename = f"{safe_filename(result.name)}_{safe_filename(result.city)}.pdf"
-    pdf_path = str(Path(pdf_dir) / pdf_filename)
-    pdf_bytes = create_lead_summary_pdf_bytes(
-        result=result,
-        generated_at=generated_at,
-        total_score=total_score,
-        confidence_total_percentage=confidence_total_percentage,
-    )
-
-    with open(pdf_path, "wb") as f:
-        f.write(pdf_bytes)
-
-    hubspot_object_id = safe_str(
-        row.get("hubspot_object_id")
-        or row.get("hs_object_id")
-        or row.get("hubspot_id")
-        or row.get("record_id")
-    )
-    hubspot_object_type = safe_str(
-        row.get("hubspot_object_type")
-        or row.get("object_type")
-        or DEFAULT_HUBSPOT_OBJECT_TYPE
-    ).lower()
-
-    hubspot_file_id = ""
-    hubspot_note_id = ""
-    hubspot_status = "not_sent_to_hubspot"
-
-    if HUBSPOT_TOKEN and hubspot_object_id:
-        try:
-            uploaded = upload_pdf_to_hubspot(pdf_bytes, pdf_filename)
-            hubspot_file_id = str(uploaded.get("id", "") or uploaded.get("fileId", ""))
-
-            note_resp = create_hubspot_note_with_attachment(
-                hubspot_object_id=hubspot_object_id,
-                hubspot_object_type=hubspot_object_type,
-                note_body=hubspot_note_summary,
-                file_id=hubspot_file_id,
-                timestamp_iso=generated_at_iso,
-            )
-            hubspot_note_id = safe_str(note_resp.get("id"))
-            hubspot_status = "note_created_with_attachment"
-        except Exception as e:
-            hubspot_status = f"hubspot_error: {e}"
-    elif not HUBSPOT_TOKEN:
-        hubspot_status = "missing_hubspot_token"
+        row = [
+            str(company_id),
+            name,
+            city,
+            country,
+            result.website or "",
+            result.instagram or "",
+            result.facebook or "",
+            result.tiktok or "",
+            str(result.tiktok_present).lower(),
+            str(result.menu_present).lower(),
+            str(result.booking_present).lower(),
+            str(result.delivery_present).lower(),
+            str(result.data_capture_present).lower(),
+            str(result.contact_present).lower(),
+            str(round(result.confidence, 3)),
+            result.source or "",
+            status,
+            needs_review_value,
+            str(result.is_restaurant_match).lower(),
+            result.non_restaurant_reason or "",
+            evidence_value,
+            datetime.now(timezone.utc).isoformat(),
+            hubspot_file_id or "",
+            pdf_cell_value
+        ]
     else:
-        hubspot_status = "missing_hubspot_object_id"
+        row = [
+            str(company_id),
+            name,
+            city,
+            country,
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            status_override or "no_requirements",
+            needs_review_override or "true",
+            "",
+            "",
+            evidence_override or "Missing required fields: name and/or city",
+            datetime.now(timezone.utc).isoformat(),
+            hubspot_file_id or "",
+            pdf_cell_value
+        ]
 
-    final_record = dict(record)
-    final_record["pdf_summary_path"] = pdf_path
-    final_record["hubspot_note_summary"] = hubspot_note_summary
-    final_record["hubspot_file_id"] = hubspot_file_id
-    final_record["hubspot_note_id"] = hubspot_note_id
-    final_record["total_score"] = total_score
-    final_record["confidence_total_percentage"] = confidence_total_percentage
-    final_record["generated_at"] = generated_at
-    final_record["hubspot_status"] = hubspot_status
-    final_record["hubspot_object_id"] = hubspot_object_id
-    final_record["hubspot_object_type"] = hubspot_object_type
-
-    return {**row, **final_record}
+    existing_row = find_row_by_company_id(ws, str(company_id))
+    if existing_row:
+        ws.update(f"A{existing_row}:X{existing_row}", [row], value_input_option="USER_ENTERED")
+    else:
+        ws.append_row(row, value_input_option="USER_ENTERED")
 
 
-# =========================================================
-# MAIN JOB
-# =========================================================
-def validate_env() -> None:
-    required = {
-        "GOOGLE_SERVICE_ACCOUNT_JSON": GOOGLE_SERVICE_ACCOUNT_JSON,
-        "GOOGLE_SHEET_ID": GOOGLE_SHEET_ID,
-        "GOOGLE_SHEET_NAME": GOOGLE_SHEET_NAME,
+def hubspot_list_contacts(limit: int = 2) -> List[Dict[str, Any]]:
+    properties = ["company", "firstname", "lastname", "city", "country", "createdate"]
+
+    url = f"{BASE_URL}/crm/v3/objects/{OBJECT_TYPE}/search"
+
+    payload = {
+        "limit": limit,
+        "properties": properties,
+        "sorts": [
+            {
+                "propertyName": "createdate",
+                "direction": "DESCENDING"
+            }
+        ]
     }
-    missing = [k for k, v in required.items() if not v]
-    if missing:
-        raise ValueError(f"Missing required environment variables: {missing}")
+
+    r = requests.post(url, headers=hs_headers(), json=payload, timeout=30)
+
+    if not r.ok:
+        print("HubSpot contact search error:")
+        print(r.status_code)
+        print(r.text)
+
+    r.raise_for_status()
+
+    data = r.json()
+    return data.get("results", [])
 
 
-def main() -> None:
-    validate_env()
+def hubspot_create_note_for_contact(
+    record_id: str,
+    note_body: str,
+    attachment_ids: Optional[List[str]] = None
+) -> Optional[str]:
+    create_url = f"{BASE_URL}/crm/v3/objects/notes"
 
-    work_dir = Path(WORK_DIR)
-    pdf_dir = ensure_dir(str(work_dir / PDF_DIR))
-    local_output_xlsx = str(work_dir / LOCAL_OUTPUT_XLSX)
+    properties = {
+        "hs_note_body": note_body,
+        "hs_timestamp": datetime.now(timezone.utc).isoformat()
+    }
 
-    print("Starting Render job...")
-    print(f"Google sheet id: {GOOGLE_SHEET_ID}")
-    print(f"Source sheet: {GOOGLE_SHEET_NAME}")
-    print(f"Output sheet: {GOOGLE_OUTPUT_SHEET_NAME}")
-    print(f"PDF dir: {pdf_dir}")
+    if attachment_ids:
+        properties["hs_attachment_ids"] = ";".join(str(x) for x in attachment_ids if x)
 
-    service = get_google_sheets_service()
-    df = read_sheet_as_dataframe(service, GOOGLE_SHEET_ID, GOOGLE_SHEET_NAME)
+    note_payload = {
+        "properties": properties,
+        "associations": [
+            {
+                "to": {"id": str(record_id)},
+                "types": [
+                    {
+                        "associationCategory": "HUBSPOT_DEFINED",
+                        "associationTypeId": 202
+                    }
+                ]
+            }
+        ]
+    }
 
-    if df.empty:
-        print("Source Google Sheet is empty. Nothing to process.")
+    r = requests.post(create_url, headers=hs_headers(), json=note_payload, timeout=30)
+
+    if not r.ok:
+        print("HubSpot note create error:")
+        print(r.status_code)
+        print(r.text)
+
+    r.raise_for_status()
+    note = r.json()
+    return note.get("id")
+
+
+def bool_to_yes_no(value: bool) -> str:
+    return "Yes" if value else "No"
+
+
+def html_link(url: str, label: str) -> str:
+    if not url:
+        return "Not found"
+    return f'<a href="{url}" target="_blank" rel="noopener noreferrer">{label}</a>'
+
+
+def build_note_body(result, name: str, city: str, country: str) -> str:
+    status = "ok"
+    evidence_text = result.evidence or ""
+
+    if result.needs_review:
+        status = "needs_review"
+
+    if (
+        ("timeout" in evidence_text.lower()) or
+        ("request error" in evidence_text.lower())
+    ) and not (result.website or result.instagram or result.facebook):
+        status = "error"
+
+    no_profile_message = ""
+    if not (result.website or result.instagram or result.facebook or result.tiktok):
+        no_profile_message = (
+            "<b>Search Result:</b> No official website or social profiles were found "
+            "after trying multiple discovery methods (OSM, guessed domain, and search providers).<br><br>"
+        )
+
+    return (
+        f"<b>Online Presence Analysis</b><br><br>"
+        f"{no_profile_message}"
+        f"<b>Confidence:</b> {round(result.confidence, 3)}<br>"
+        f"<b>Needs review:</b> {bool_to_yes_no(result.needs_review)}<br>"
+        f"<b>Status:</b> {status}<br>"
+        f"<b>Restaurant match:</b> {bool_to_yes_no(result.is_restaurant_match)}<br>"
+        f"<b>Non-restaurant reason:</b> {result.non_restaurant_reason or 'N/A'}<br><br>"
+        f"<b>Website:</b> {html_link(result.website, 'Open website')}<br>"
+        f"<b>Instagram:</b> {html_link(result.instagram, 'Open Instagram')}<br>"
+        f"<b>Facebook:</b> {html_link(result.facebook, 'Open Facebook')}<br><br>"
+        f"<b>TikTok:</b> {html_link(result.tiktok, 'Open TikTok')}<br><br>"
+        f"<b>Menu online:</b> {bool_to_yes_no(result.menu_present)}<br>"
+        f"<b>Booking online:</b> {bool_to_yes_no(result.booking_present)}<br>"
+        f"<b>Delivery:</b> {bool_to_yes_no(result.delivery_present)}<br>"
+        f"<b>Data capture:</b> {bool_to_yes_no(result.data_capture_present)}<br>"
+        f"<b>Contact info:</b> {bool_to_yes_no(result.contact_present)}<br>"
+        f"<b>Source:</b> {result.source or 'N/A'}"
+    )
+
+
+def safe_text(value) -> str:
+    if value is None:
+        return ""
+    return str(value).replace("\r", " ").replace("\n", " ").strip()
+
+
+def chunk_long_text(text: str, chunk_size: int = 90) -> str:
+    text = safe_text(text)
+    if not text:
+        return ""
+
+    parts = []
+    while len(text) > chunk_size:
+        parts.append(text[:chunk_size])
+        text = text[chunk_size:]
+    if text:
+        parts.append(text)
+
+    return "\n".join(parts)
+
+
+def make_pdf_for_result(record_id: str, name: str, city: str, country: str, result) -> str:
+    status = "ok"
+    evidence_text = safe_text(result.evidence or "")
+
+    if result.needs_review:
+        status = "needs_review"
+    if (
+        ("timeout" in evidence_text.lower()) or
+        ("request error" in evidence_text.lower())
+    ) and not (result.website or result.instagram or result.facebook):
+        status = "error"
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_margins(left=15, top=15, right=15)
+    pdf.add_page()
+
+    usable_width = pdf.w - pdf.l_margin - pdf.r_margin
+
+    pdf.set_font("helvetica", "B", 14)
+    pdf.multi_cell(usable_width, 10, "Online Presence Analysis")
+    pdf.ln(2)
+
+    pdf.set_font("helvetica", "", 11)
+
+    lines = [
+        f"HubSpot Record ID: {safe_text(record_id)}",
+        f"Restaurant: {safe_text(name)}",
+        f"City: {safe_text(city)}",
+        f"Country: {safe_text(country)}",
+        "",
+        f"Website: {chunk_long_text(result.website or 'Not found')}",
+        f"Instagram: {chunk_long_text(result.instagram or 'Not found')}",
+        f"Facebook: {chunk_long_text(result.facebook or 'Not found')}",
+        f"TikTok: {chunk_long_text(result.tiktok or 'Not found')}",
+        "",
+        f"Menu online: {bool_to_yes_no(result.menu_present)}",
+        f"Booking online: {bool_to_yes_no(result.booking_present)}",
+        f"Delivery: {bool_to_yes_no(result.delivery_present)}",
+        f"Data capture: {bool_to_yes_no(result.data_capture_present)}",
+        f"Contact info: {bool_to_yes_no(result.contact_present)}",
+        "",
+        f"Confidence: {round(result.confidence, 3)}",
+        f"Source: {safe_text(result.source or 'N/A')}",
+        f"Status: {status}",
+        f"Needs review: {bool_to_yes_no(result.needs_review)}",
+        f"Restaurant match: {bool_to_yes_no(result.is_restaurant_match)}",
+        f"Non-restaurant reason: {safe_text(result.non_restaurant_reason or 'N/A')}",
+        "",
+        f"Evidence: {chunk_long_text(evidence_text, 85) or 'N/A'}",
+        "",
+        f"Generated at: {datetime.now(timezone.utc).isoformat()}",
+    ]
+
+    for line in lines:
+        pdf.multi_cell(usable_width, 8, safe_text(line))
+        pdf.ln(1)
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    tmp_path = tmp.name
+    tmp.close()
+
+    pdf.output(tmp_path)
+    return tmp_path
+
+
+def hubspot_upload_file(file_path: str, file_name: str) -> Optional[str]:
+    url = f"{BASE_URL}/files/v3/files"
+
+    headers = {
+        "Authorization": f"Bearer {HUBSPOT_TOKEN}"
+    }
+
+    options = '{"access":"PRIVATE"}'
+
+    with open(file_path, "rb") as f:
+        files = {
+            "file": (file_name, f, "application/pdf")
+        }
+        data = {
+            "fileName": file_name,
+            "folderPath": "/online-presence-reports",
+            "options": options
+        }
+
+        r = requests.post(url, headers=headers, files=files, data=data, timeout=60)
+
+    if not r.ok:
+        print("HubSpot file upload error:")
+        print(r.status_code)
+        print(r.text)
+
+    r.raise_for_status()
+    uploaded = r.json()
+    return uploaded.get("id")
+
+
+def build_missing_requirements_note(name: str, city: str, country: str) -> str:
+    return (
+        f"<b>Online Presence Analysis</b><br><br>"
+        f"<b>Status:</b> no_requirements<br>"
+        f"<b>Needs review:</b> Yes<br>"
+        f"<b>Reason:</b> Missing required fields for analysis<br><br>"
+        f"<b>Name:</b> {name or 'Missing'}<br>"
+        f"<b>City:</b> {city or 'Missing'}<br>"
+        f"<b>Country:</b> {country or 'Missing'}"
+    )
+
+
+def process_one_company(company: Dict[str, Any], ws, existing_ids: set[str]) -> None:
+    record_id = company["id"]
+    props = company.get("properties", {}) or {}
+
+    name_company = (props.get("company") or "").strip()
+    firstname = (props.get("firstname") or "").strip()
+    lastname = (props.get("lastname") or "").strip()
+
+    contact_name = " ".join(part for part in [firstname, lastname] if part).strip()
+
+    if name_company and contact_name:
+        name = f"{name_company} {contact_name}"
+    elif name_company:
+        name = name_company
+    else:
+        name = contact_name
+
+    city = (props.get(PROP_CITY) or "").strip()
+    country = (props.get(PROP_COUNTRY) or "Italy").strip()
+
+    print("DEBUG record:", record_id)
+    print("DEBUG props:", props)
+    print("DEBUG company field:", name_company)
+    print("DEBUG firstname field:", firstname)
+    print("DEBUG lastname field:", lastname)
+    print("DEBUG contact_name:", contact_name)
+    print("DEBUG final name:", name)
+    print("DEBUG city:", city)
+    print("DEBUG country:", country)
+
+    if already_processed(existing_ids, str(record_id)):
+        print(f"Skipping {record_id}: already processed in Google Sheet")
         return
 
-    required_cols = {"name", "city", "country"}
-    missing_cols = required_cols - set(df.columns)
-    if missing_cols:
-        raise ValueError(f"Missing required sheet columns: {sorted(missing_cols)}")
+    if not name or not city:
+        print(f"Record {record_id}: missing requirements, creating simple note and sheet row")
 
-    cache = rr.load_cache()
-    out_rows: List[Dict[str, Any]] = []
+        note_body = build_missing_requirements_note(name, city, country)
 
-    processed_count = 0
-    for _, row in df.iterrows():
-        row_dict = row.to_dict()
+        upsert_company_result(
+            ws,
+            company_id=str(record_id),
+            name=name,
+            city=city,
+            country=country,
+            result=None,
+            status_override="no_requirements",
+            needs_review_override="true",
+            evidence_override="Missing required fields: name and/or city"
+        )
 
-        if ONLY_PROCESS_ROWS_WITHOUT_STATUS and safe_str(row_dict.get("hubspot_status")):
-            out_rows.append(row_dict)
-            continue
+        existing_ids.add(str(record_id))
 
-        try:
-            processed = process_row(row_dict, cache, pdf_dir)
-        except Exception as e:
-            processed = dict(row_dict)
-            processed["hubspot_status"] = f"row_processing_error: {e}"
-            processed["generated_at"] = now_utc_text()
+        note_id = hubspot_create_note_for_contact(record_id, note_body, attachment_ids=[])
+        print(f"Created simple note {note_id} for record {record_id} without PDF")
+        return
 
-        out_rows.append(processed)
-        processed_count += 1
+    result = resolve_one(name, city, country)
 
-        if processed_count % max(1, HUBSPOT_BATCH_LIMIT) == 0:
-            time.sleep(REQUEST_DELAY)
+    note_body = build_note_body(result, name, city, country)
 
-        time.sleep(REQUEST_DELAY)
-
-    out_df = pd.DataFrame(out_rows)
-    out_df.to_excel(local_output_xlsx, index=False)
-
-    write_dataframe_to_sheet(
-        service=service,
-        spreadsheet_id=GOOGLE_SHEET_ID,
-        sheet_name=GOOGLE_OUTPUT_SHEET_NAME,
-        df=out_df,
+    pdf_path = make_pdf_for_result(
+        record_id=str(record_id),
+        name=name,
+        city=city,
+        country=country,
+        result=result
     )
 
-    print(f"Saved local Excel: {local_output_xlsx}")
-    print(f"Updated Google output sheet: {GOOGLE_OUTPUT_SHEET_NAME}")
-    print("Render job completed successfully.")
+    safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name)
+    pdf_file_name = f"{safe_name}_{record_id}_online_presence.pdf"
+
+    file_id = ""
+    pdf_url = ""
+
+    try:
+        file_id = hubspot_upload_file(pdf_path, pdf_file_name) or ""
+        pdf_url = hubspot_get_signed_file_url(file_id) if file_id else ""
+    except Exception as e:
+        print(f"PDF upload skipped for record {record_id}: {e}")
+
+    upsert_company_result(
+        ws,
+        company_id=str(record_id),
+        name=name,
+        city=city,
+        country=country,
+        result=result,
+        hubspot_file_id=file_id,
+        pdf_url=pdf_url or ""
+    )
+
+    existing_ids.add(str(record_id))
+
+    attachment_ids = [file_id] if file_id else []
+    note_id = hubspot_create_note_for_contact(
+        record_id,
+        note_body,
+        attachment_ids=attachment_ids
+    )
+
+    print(f"Created note {note_id} for record {record_id} with PDF attachment {file_id}")
+    print(f"PDF URL saved to Google Sheet: {pdf_url}")
+
+
+def run_once(limit: int = POLL_LIMIT) -> None:
+    ws = get_worksheet()
+    existing_ids = get_existing_company_ids(ws)
+
+    contacts = hubspot_list_contacts(limit=limit)
+    print(f"Found {len(contacts)} records to process.")
+
+    for contact in contacts:
+        try:
+            print(f"Processing record {contact['id']}...")
+            process_one_company(contact, ws, existing_ids)
+        except Exception as e:
+            print(f"Error processing record {contact.get('id')}: {e}")
+            traceback.print_exc()
+        time.sleep(SLEEP_BETWEEN_RECORDS)
 
 
 if __name__ == "__main__":
-    main()
+    run_once()
