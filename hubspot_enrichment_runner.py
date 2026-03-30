@@ -390,7 +390,32 @@ def build_note_body(result, name: str, city: str, country: str) -> str:
 def safe_text(value) -> str:
     if value is None:
         return ""
-    return str(value).replace("\r", " ").replace("\n", " ").strip()
+
+    text = str(value)
+
+    replacements = {
+        "→": "->",
+        "←": "<-",
+        "•": "-",
+        "–": "-",
+        "—": "-",
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "…": "...",
+        "\u00a0": " ",   # non-breaking space
+    }
+
+    for bad, good in replacements.items():
+        text = text.replace(bad, good)
+
+    text = text.replace("\r", " ").replace("\n", " ").strip()
+
+    # final protection for latin-1 / helvetica
+    text = text.encode("latin-1", errors="replace").decode("latin-1")
+
+    return text
 
 
 def chunk_long_text(text: str, chunk_size: int = 90) -> str:
