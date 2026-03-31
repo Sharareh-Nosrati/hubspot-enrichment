@@ -35,15 +35,15 @@ _worksheet = None
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive"
 ]
 
-HEADERS = [
+# Exact Excel schema order
+RESULT_FIELDS = [
     "hubspot_company_id",
     "name",
     "city",
     "country",
-
     "website",
     "instagram",
     "facebook",
@@ -53,7 +53,6 @@ HEADERS = [
     "youtube",
     "linktree",
     "uqrto",
-
     "google_maps_url",
     "justeat_url",
     "deliveroo_url",
@@ -63,22 +62,18 @@ HEADERS = [
     "restaurantguru_url",
     "opentable_url",
     "quandoo_url",
-
     "google_reviews_count",
     "google_rating_average",
     "instagram_bio_website",
-
     "website_creator",
     "website_creator_type",
     "website_creator_confidence",
     "website_creator_source",
     "website_platform",
-
     "website_score",
     "website_validated",
     "website_validation_score",
     "website_validation_reason",
-
     "instagram_score",
     "facebook_score",
     "tiktok_score",
@@ -87,7 +82,6 @@ HEADERS = [
     "youtube_score",
     "linktree_score",
     "uqrto_score",
-
     "website_match_reason",
     "instagram_match_reason",
     "facebook_match_reason",
@@ -97,7 +91,6 @@ HEADERS = [
     "youtube_match_reason",
     "linktree_match_reason",
     "uqrto_match_reason",
-
     "website_found_from",
     "instagram_found_from",
     "facebook_found_from",
@@ -107,15 +100,12 @@ HEADERS = [
     "youtube_found_from",
     "linktree_found_from",
     "uqrto_found_from",
-
     "instagram_bio_links_json",
     "facebook_bio_links_json",
     "instagram_primary_external_link",
     "facebook_primary_external_link",
-
     "directory_links_json",
     "official_website_candidates_json",
-
     "has_directory_profile",
     "has_google_maps",
     "has_justeat",
@@ -126,27 +116,25 @@ HEADERS = [
     "has_restaurantguru",
     "has_opentable",
     "has_quandoo",
-
     "confidence",
     "source",
     "evidence",
     "needs_review",
     "status",
-
     "menu_present",
     "booking_present",
     "delivery_present",
     "data_capture_present",
     "contact_present",
-
     "is_restaurant_match",
     "non_restaurant_reason",
     "tiktok_present",
-
     "last_checked",
     "hubspot_file_id",
     "pdf_url",
 ]
+
+HEADERS = RESULT_FIELDS[:]
 
 
 def hs_headers() -> Dict[str, str]:
@@ -154,54 +142,97 @@ def hs_headers() -> Dict[str, str]:
         raise ValueError("HUBSPOT_TOKEN is missing.")
     return {
         "Authorization": f"Bearer {HUBSPOT_TOKEN}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     }
 
 
-def safe_getattr(obj: Any, attr: str, default: Any = "") -> Any:
-    return getattr(obj, attr, default) if obj is not None else default
+def get_attr(result: Any, key: str, default: Any = "") -> Any:
+    if result is None:
+        return default
+    return getattr(result, key, default)
 
 
-def bool_str(value: Any) -> str:
-    return str(bool(value)).lower()
+def normalize_value(key: str, value: Any) -> str:
+    bool_fields = {
+        "website_validated",
+        "has_directory_profile",
+        "has_google_maps",
+        "has_justeat",
+        "has_deliveroo",
+        "has_thefork",
+        "has_tripadvisor",
+        "has_glovo",
+        "has_restaurantguru",
+        "has_opentable",
+        "has_quandoo",
+        "needs_review",
+        "menu_present",
+        "booking_present",
+        "delivery_present",
+        "data_capture_present",
+        "contact_present",
+        "is_restaurant_match",
+        "tiktok_present",
+    }
 
+    float_fields = {
+        "website_score",
+        "website_validation_score",
+        "instagram_score",
+        "facebook_score",
+        "tiktok_score",
+        "threads_score",
+        "x_score",
+        "youtube_score",
+        "linktree_score",
+        "uqrto_score",
+        "confidence",
+    }
 
-def safe_float_str(value: Any) -> str:
-    try:
-        if value is None or value == "":
-            return ""
-        return str(round(float(value), 3))
-    except Exception:
-        return str(value) if value is not None else ""
+    json_fields = {
+        "instagram_bio_links_json",
+        "facebook_bio_links_json",
+        "directory_links_json",
+        "official_website_candidates_json",
+    }
 
-
-def safe_json_str(value: Any) -> str:
     if value is None:
         return ""
-    if isinstance(value, str):
-        return value
-    try:
-        return json.dumps(value, ensure_ascii=False)
-    except Exception:
-        return str(value)
+
+    if key in bool_fields:
+        return str(bool(value)).lower()
+
+    if key in float_fields:
+        try:
+            return str(round(float(value), 3))
+        except Exception:
+            return ""
+
+    if key in json_fields:
+        if isinstance(value, str):
+            return value
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+
+    return str(value)
 
 
-def column_index_to_letter(index_1_based: int) -> str:
+def excel_col_letter(col_num: int) -> str:
     result = ""
-    n = index_1_based
-    while n > 0:
-        n, remainder = divmod(n - 1, 26)
+    while col_num > 0:
+        col_num, remainder = divmod(col_num - 1, 26)
         result = chr(65 + remainder) + result
     return result
 
 
-def sheet_header_range() -> str:
-    return f"A1:{column_index_to_letter(len(HEADERS))}1"
+def header_range() -> str:
+    return f"A1:{excel_col_letter(len(HEADERS))}1"
 
 
-def row_range(row_num: int) -> str:
-    end_col = column_index_to_letter(len(HEADERS))
-    return f"A{row_num}:{end_col}{row_num}"
+def row_range(row_number: int) -> str:
+    return f"A{row_number}:{excel_col_letter(len(HEADERS))}{row_number}"
 
 
 def get_gspread_client():
@@ -250,7 +281,7 @@ def get_worksheet():
     if not existing_headers:
         ws.append_row(HEADERS)
     elif existing_headers != HEADERS:
-        ws.update(values=[HEADERS], range_name=sheet_header_range())
+        ws.update(values=[HEADERS], range_name=header_range())
 
     _worksheet = ws
     return _worksheet
@@ -262,9 +293,6 @@ def get_existing_company_ids(ws) -> set[str]:
 
 
 def find_row_by_company_id(ws, company_id: str):
-    if ws is None:
-        raise ValueError("Worksheet is None in find_row_by_company_id().")
-
     values = ws.get_all_values()
     for idx, row in enumerate(values[1:], start=2):
         if row and row[0] == str(company_id):
@@ -274,6 +302,30 @@ def find_row_by_company_id(ws, company_id: str):
 
 def already_processed(existing_ids: set[str], company_id: str) -> bool:
     return str(company_id) in existing_ids
+
+
+def compute_status(result) -> str:
+    if result is None:
+        return "no_requirements"
+
+    status = "ok"
+    evidence_text = get_attr(result, "evidence", "") or ""
+
+    if get_attr(result, "needs_review", False):
+        status = "needs_review"
+
+    if (
+        ("timeout" in evidence_text.lower()) or
+        ("request error" in evidence_text.lower())
+    ) and not (
+        get_attr(result, "website", "") or
+        get_attr(result, "instagram", "") or
+        get_attr(result, "facebook", "") or
+        get_attr(result, "tiktok", "")
+    ):
+        status = "error"
+
+    return status
 
 
 def hubspot_get_signed_file_url(file_id: str) -> Optional[str]:
@@ -286,201 +338,60 @@ def hubspot_get_signed_file_url(file_id: str) -> Optional[str]:
         print(r.text)
         return None
 
-    data = r.json()
-    return data.get("url")
+    return r.json().get("url")
 
 
-def compute_status(result) -> str:
-    status = "ok"
-    evidence_text = safe_getattr(result, "evidence", "") or ""
-
-    if safe_getattr(result, "needs_review", False):
-        status = "needs_review"
-
-    if (
-        ("timeout" in evidence_text.lower()) or
-        ("request error" in evidence_text.lower())
-    ) and not (
-        safe_getattr(result, "website", "") or
-        safe_getattr(result, "instagram", "") or
-        safe_getattr(result, "facebook", "") or
-        safe_getattr(result, "tiktok", "")
-    ):
-        status = "error"
-
-    return status
-
-
-def build_result_row(
+def build_row(
     company_id: str,
     name: str,
     city: str,
     country: str,
-    result,
+    result=None,
     hubspot_file_id: str = "",
     pdf_url: str = "",
     status_override: str = "",
     needs_review_override: str = "",
     evidence_override: str = "",
 ) -> List[str]:
+    row_data = {key: "" for key in RESULT_FIELDS}
+
+    row_data["hubspot_company_id"] = str(company_id)
+    row_data["name"] = name
+    row_data["city"] = city
+    row_data["country"] = country
+    row_data["last_checked"] = datetime.now(timezone.utc).isoformat()
+    row_data["hubspot_file_id"] = hubspot_file_id or ""
+    row_data["pdf_url"] = pdf_url or ""
+
     if result is None:
-        return [
-            str(company_id),
-            name,
-            city,
-            country,
+        row_data["status"] = status_override or "no_requirements"
+        row_data["needs_review"] = needs_review_override or "true"
+        row_data["evidence"] = evidence_override or "Missing required fields: name and/or city"
+        row_data["is_restaurant_match"] = "false"
+        row_data["non_restaurant_reason"] = "Missing required fields: name and/or city"
+        row_data["tiktok_present"] = "false"
+        return [normalize_value(key, row_data[key]) for key in RESULT_FIELDS]
 
-            "", "", "", "", "", "", "", "", "",
+    for key in RESULT_FIELDS:
+        if key in {
+            "hubspot_company_id", "name", "city", "country",
+            "last_checked", "hubspot_file_id", "pdf_url", "status"
+        }:
+            continue
+        row_data[key] = get_attr(result, key, "")
 
-            "", "", "", "", "", "", "", "", "",
+    row_data["status"] = status_override or compute_status(result)
 
-            "", "", "",
+    if needs_review_override:
+        row_data["needs_review"] = needs_review_override
+    if evidence_override:
+        row_data["evidence"] = evidence_override
 
-            "", "", "", "", "",
+    row_data["last_checked"] = datetime.now(timezone.utc).isoformat()
+    row_data["hubspot_file_id"] = hubspot_file_id or ""
+    row_data["pdf_url"] = pdf_url or ""
 
-            "", "", "", "",
-
-            "", "", "", "", "", "", "", "",
-
-            "", "", "", "", "", "", "", "", "",
-
-            "", "", "", "", "", "", "", "", "",
-
-            "", "", "", "",
-
-            "", "",
-
-            "false", "false", "false", "false", "false", "false", "false", "false", "false", "false",
-
-            "", "",
-            evidence_override or "Missing required fields: name and/or city",
-            needs_review_override or "true",
-            status_override or "no_requirements",
-
-            "false", "false", "false", "false", "false",
-
-            "false",
-            "Missing required fields: name and/or city",
-            "false",
-
-            datetime.now(timezone.utc).isoformat(),
-            hubspot_file_id or "",
-            pdf_url or "",
-        ]
-
-    status = status_override or compute_status(result)
-    evidence_value = evidence_override or (safe_getattr(result, "evidence", "") or "")
-    needs_review_value = needs_review_override or bool_str(safe_getattr(result, "needs_review", False))
-
-    return [
-        str(company_id),
-        name,
-        city,
-        country,
-
-        safe_getattr(result, "website", "") or "",
-        safe_getattr(result, "instagram", "") or "",
-        safe_getattr(result, "facebook", "") or "",
-        safe_getattr(result, "tiktok", "") or "",
-        safe_getattr(result, "threads", "") or "",
-        safe_getattr(result, "x", "") or "",
-        safe_getattr(result, "youtube", "") or "",
-        safe_getattr(result, "linktree", "") or "",
-        safe_getattr(result, "uqrto", "") or "",
-
-        safe_getattr(result, "google_maps_url", "") or "",
-        safe_getattr(result, "justeat_url", "") or "",
-        safe_getattr(result, "deliveroo_url", "") or "",
-        safe_getattr(result, "thefork_url", "") or "",
-        safe_getattr(result, "tripadvisor_url", "") or "",
-        safe_getattr(result, "glovo_url", "") or "",
-        safe_getattr(result, "restaurantguru_url", "") or "",
-        safe_getattr(result, "opentable_url", "") or "",
-        safe_getattr(result, "quandoo_url", "") or "",
-
-        str(safe_getattr(result, "google_reviews_count", "") or ""),
-        str(safe_getattr(result, "google_rating_average", "") or ""),
-        safe_getattr(result, "instagram_bio_website", "") or "",
-
-        safe_getattr(result, "website_creator", "") or "",
-        safe_getattr(result, "website_creator_type", "") or "",
-        safe_getattr(result, "website_creator_confidence", "") or "",
-        safe_getattr(result, "website_creator_source", "") or "",
-        safe_getattr(result, "website_platform", "") or "",
-
-        safe_float_str(safe_getattr(result, "website_score", "")),
-        bool_str(safe_getattr(result, "website_validated", False)),
-        safe_float_str(safe_getattr(result, "website_validation_score", "")),
-        safe_getattr(result, "website_validation_reason", "") or "",
-
-        safe_float_str(safe_getattr(result, "instagram_score", "")),
-        safe_float_str(safe_getattr(result, "facebook_score", "")),
-        safe_float_str(safe_getattr(result, "tiktok_score", "")),
-        safe_float_str(safe_getattr(result, "threads_score", "")),
-        safe_float_str(safe_getattr(result, "x_score", "")),
-        safe_float_str(safe_getattr(result, "youtube_score", "")),
-        safe_float_str(safe_getattr(result, "linktree_score", "")),
-        safe_float_str(safe_getattr(result, "uqrto_score", "")),
-
-        safe_getattr(result, "website_match_reason", "") or "",
-        safe_getattr(result, "instagram_match_reason", "") or "",
-        safe_getattr(result, "facebook_match_reason", "") or "",
-        safe_getattr(result, "tiktok_match_reason", "") or "",
-        safe_getattr(result, "threads_match_reason", "") or "",
-        safe_getattr(result, "x_match_reason", "") or "",
-        safe_getattr(result, "youtube_match_reason", "") or "",
-        safe_getattr(result, "linktree_match_reason", "") or "",
-        safe_getattr(result, "uqrto_match_reason", "") or "",
-
-        safe_getattr(result, "website_found_from", "") or "",
-        safe_getattr(result, "instagram_found_from", "") or "",
-        safe_getattr(result, "facebook_found_from", "") or "",
-        safe_getattr(result, "tiktok_found_from", "") or "",
-        safe_getattr(result, "threads_found_from", "") or "",
-        safe_getattr(result, "x_found_from", "") or "",
-        safe_getattr(result, "youtube_found_from", "") or "",
-        safe_getattr(result, "linktree_found_from", "") or "",
-        safe_getattr(result, "uqrto_found_from", "") or "",
-
-        safe_json_str(safe_getattr(result, "instagram_bio_links_json", "")),
-        safe_json_str(safe_getattr(result, "facebook_bio_links_json", "")),
-        safe_getattr(result, "instagram_primary_external_link", "") or "",
-        safe_getattr(result, "facebook_primary_external_link", "") or "",
-
-        safe_json_str(safe_getattr(result, "directory_links_json", "")),
-        safe_json_str(safe_getattr(result, "official_website_candidates_json", "")),
-
-        bool_str(safe_getattr(result, "has_directory_profile", False)),
-        bool_str(safe_getattr(result, "has_google_maps", False)),
-        bool_str(safe_getattr(result, "has_justeat", False)),
-        bool_str(safe_getattr(result, "has_deliveroo", False)),
-        bool_str(safe_getattr(result, "has_thefork", False)),
-        bool_str(safe_getattr(result, "has_tripadvisor", False)),
-        bool_str(safe_getattr(result, "has_glovo", False)),
-        bool_str(safe_getattr(result, "has_restaurantguru", False)),
-        bool_str(safe_getattr(result, "has_opentable", False)),
-        bool_str(safe_getattr(result, "has_quandoo", False)),
-
-        safe_float_str(safe_getattr(result, "confidence", "")),
-        safe_getattr(result, "source", "") or "",
-        evidence_value,
-        needs_review_value,
-        status,
-
-        bool_str(safe_getattr(result, "menu_present", False)),
-        bool_str(safe_getattr(result, "booking_present", False)),
-        bool_str(safe_getattr(result, "delivery_present", False)),
-        bool_str(safe_getattr(result, "data_capture_present", False)),
-        bool_str(safe_getattr(result, "contact_present", False)),
-
-        bool_str(safe_getattr(result, "is_restaurant_match", False)),
-        safe_getattr(result, "non_restaurant_reason", "") or "",
-        bool_str(safe_getattr(result, "tiktok_present", False)),
-
-        datetime.now(timezone.utc).isoformat(),
-        hubspot_file_id or "",
-        pdf_url or "",
-    ]
+    return [normalize_value(key, row_data[key]) for key in RESULT_FIELDS]
 
 
 def upsert_company_result(
@@ -494,9 +405,9 @@ def upsert_company_result(
     pdf_url: str = "",
     status_override: str = "",
     needs_review_override: str = "",
-    evidence_override: str = "",
+    evidence_override: str = ""
 ) -> None:
-    row = build_result_row(
+    row = build_row(
         company_id=company_id,
         name=name,
         city=city,
@@ -514,7 +425,7 @@ def upsert_company_result(
         ws.update(
             values=[row],
             range_name=row_range(existing_row),
-            value_input_option="USER_ENTERED",
+            value_input_option="USER_ENTERED"
         )
     else:
         ws.append_row(row, value_input_option="USER_ENTERED")
@@ -527,12 +438,7 @@ def hubspot_list_contacts(limit: int = 2) -> List[Dict[str, Any]]:
     payload = {
         "limit": limit,
         "properties": properties,
-        "sorts": [
-            {
-                "propertyName": "createdate",
-                "direction": "DESCENDING",
-            }
-        ],
+        "sorts": [{"propertyName": "createdate", "direction": "DESCENDING"}]
     }
 
     r = requests.post(url, headers=hs_headers(), json=payload, timeout=30)
@@ -543,20 +449,19 @@ def hubspot_list_contacts(limit: int = 2) -> List[Dict[str, Any]]:
         print(r.text)
 
     r.raise_for_status()
-    data = r.json()
-    return data.get("results", [])
+    return r.json().get("results", [])
 
 
 def hubspot_create_note_for_contact(
     record_id: str,
     note_body: str,
-    attachment_ids: Optional[List[str]] = None,
+    attachment_ids: Optional[List[str]] = None
 ) -> Optional[str]:
     create_url = f"{BASE_URL}/crm/v3/objects/notes"
 
     properties = {
         "hs_note_body": note_body,
-        "hs_timestamp": datetime.now(timezone.utc).isoformat(),
+        "hs_timestamp": datetime.now(timezone.utc).isoformat()
     }
 
     if attachment_ids:
@@ -570,11 +475,11 @@ def hubspot_create_note_for_contact(
                 "types": [
                     {
                         "associationCategory": "HUBSPOT_DEFINED",
-                        "associationTypeId": 202,
+                        "associationTypeId": 202
                     }
-                ],
+                ]
             }
-        ],
+        ]
     }
 
     r = requests.post(create_url, headers=hs_headers(), json=note_payload, timeout=30)
@@ -585,8 +490,7 @@ def hubspot_create_note_for_contact(
         print(r.text)
 
     r.raise_for_status()
-    note = r.json()
-    return note.get("id")
+    return r.json().get("id")
 
 
 def bool_to_yes_no(value: bool) -> str:
@@ -607,28 +511,21 @@ def build_note_body(result, name: str, city: str, country: str) -> str:
         f"<b>Lead:</b> {name or 'N/A'}<br>"
         f"<b>City:</b> {city or 'N/A'}<br>"
         f"<b>Country:</b> {country or 'N/A'}<br>"
-        f"<b>Confidence:</b> {safe_float_str(safe_getattr(result, 'confidence', ''))}<br>"
+        f"<b>Confidence:</b> {normalize_value('confidence', get_attr(result, 'confidence', ''))}<br>"
         f"<b>Status:</b> {status}<br>"
-        f"<b>Needs review:</b> {bool_to_yes_no(safe_getattr(result, 'needs_review', False))}<br>"
-        f"<b>Restaurant match:</b> {bool_to_yes_no(safe_getattr(result, 'is_restaurant_match', False))}<br>"
-        f"<b>Non-restaurant reason:</b> {safe_getattr(result, 'non_restaurant_reason', '') or 'N/A'}<br><br>"
-
-        f"<b>Website:</b> {html_link(safe_getattr(result, 'website', ''), 'Open website')}<br>"
-        f"<b>Instagram:</b> {html_link(safe_getattr(result, 'instagram', ''), 'Open Instagram')}<br>"
-        f"<b>Facebook:</b> {html_link(safe_getattr(result, 'facebook', ''), 'Open Facebook')}<br>"
-        f"<b>TikTok:</b> {html_link(safe_getattr(result, 'tiktok', ''), 'Open TikTok')}<br>"
-        f"<b>Threads:</b> {html_link(safe_getattr(result, 'threads', ''), 'Open Threads')}<br>"
-        f"<b>X:</b> {html_link(safe_getattr(result, 'x', ''), 'Open X')}<br>"
-        f"<b>YouTube:</b> {html_link(safe_getattr(result, 'youtube', ''), 'Open YouTube')}<br>"
-        f"<b>Google Maps:</b> {html_link(safe_getattr(result, 'google_maps_url', ''), 'Open Google Maps')}<br><br>"
-
-        f"<b>Menu:</b> {bool_to_yes_no(safe_getattr(result, 'menu_present', False))}<br>"
-        f"<b>Booking:</b> {bool_to_yes_no(safe_getattr(result, 'booking_present', False))}<br>"
-        f"<b>Delivery:</b> {bool_to_yes_no(safe_getattr(result, 'delivery_present', False))}<br>"
-        f"<b>Data capture:</b> {bool_to_yes_no(safe_getattr(result, 'data_capture_present', False))}<br>"
-        f"<b>Contact info:</b> {bool_to_yes_no(safe_getattr(result, 'contact_present', False))}<br>"
-        f"<b>Website creator:</b> {safe_getattr(result, 'website_creator', '') or 'N/A'}<br>"
-        f"<b>Source:</b> {safe_getattr(result, 'source', '') or 'N/A'}"
+        f"<b>Needs review:</b> {bool_to_yes_no(get_attr(result, 'needs_review', False))}<br>"
+        f"<b>Website:</b> {html_link(get_attr(result, 'website', ''), 'Open website')}<br>"
+        f"<b>Instagram:</b> {html_link(get_attr(result, 'instagram', ''), 'Open Instagram')}<br>"
+        f"<b>Facebook:</b> {html_link(get_attr(result, 'facebook', ''), 'Open Facebook')}<br>"
+        f"<b>TikTok:</b> {html_link(get_attr(result, 'tiktok', ''), 'Open TikTok')}<br>"
+        f"<b>Google Maps:</b> {html_link(get_attr(result, 'google_maps_url', ''), 'Open Google Maps')}<br>"
+        f"<b>Menu:</b> {bool_to_yes_no(get_attr(result, 'menu_present', False))}<br>"
+        f"<b>Booking:</b> {bool_to_yes_no(get_attr(result, 'booking_present', False))}<br>"
+        f"<b>Delivery:</b> {bool_to_yes_no(get_attr(result, 'delivery_present', False))}<br>"
+        f"<b>Data capture:</b> {bool_to_yes_no(get_attr(result, 'data_capture_present', False))}<br>"
+        f"<b>Contact info:</b> {bool_to_yes_no(get_attr(result, 'contact_present', False))}<br>"
+        f"<b>Website creator:</b> {get_attr(result, 'website_creator', '') or 'N/A'}<br>"
+        f"<b>Source:</b> {get_attr(result, 'source', '') or 'N/A'}"
     )
 
 
@@ -637,7 +534,6 @@ def safe_text(value) -> str:
         return ""
 
     text = str(value)
-
     replacements = {
         "→": "->",
         "←": "<-",
@@ -675,8 +571,6 @@ def chunk_long_text(text: str, chunk_size: int = 90) -> str:
 
 
 def make_pdf_for_result(record_id: str, name: str, city: str, country: str, result) -> str:
-    status = compute_status(result)
-
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_margins(left=15, top=15, right=15)
@@ -697,43 +591,25 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
         f"Country: {safe_text(country)}",
         f"Generated: {datetime.now(timezone.utc).isoformat()}",
         "",
-
-        f"Total score: {safe_float_str(safe_getattr(result, 'website_score', '')) or 'N/A'}",
-        f"Confidence total percentage: {safe_float_str(safe_getattr(result, 'confidence', ''))}",
-        f"Status: {status}",
+        f"Website: {chunk_long_text(get_attr(result, 'website', '') or 'Not found')}",
+        f"Instagram: {chunk_long_text(get_attr(result, 'instagram', '') or 'Not found')}",
+        f"Facebook: {chunk_long_text(get_attr(result, 'facebook', '') or 'Not found')}",
+        f"TikTok: {chunk_long_text(get_attr(result, 'tiktok', '') or 'Not found')}",
+        f"Threads: {chunk_long_text(get_attr(result, 'threads', '') or 'Not found')}",
+        f"X: {chunk_long_text(get_attr(result, 'x', '') or 'Not found')}",
+        f"YouTube: {chunk_long_text(get_attr(result, 'youtube', '') or 'Not found')}",
+        f"Google Maps: {chunk_long_text(get_attr(result, 'google_maps_url', '') or 'Not found')}",
         "",
-
-        f"Website: {chunk_long_text(safe_getattr(result, 'website', '') or 'Not found')}",
-        f"Search website candidate list: {chunk_long_text(safe_getattr(result, 'official_website_candidates_json', '') or '[]')}",
+        f"Menu: {bool_to_yes_no(get_attr(result, 'menu_present', False))}",
+        f"Booking: {bool_to_yes_no(get_attr(result, 'booking_present', False))}",
+        f"Delivery: {bool_to_yes_no(get_attr(result, 'delivery_present', False))}",
+        f"Data capture: {bool_to_yes_no(get_attr(result, 'data_capture_present', False))}",
+        f"Contact info: {bool_to_yes_no(get_attr(result, 'contact_present', False))}",
+        f"Website creator: {safe_text(get_attr(result, 'website_creator', '') or 'N/A')}",
         "",
-
-        f"Menu: {bool_to_yes_no(safe_getattr(result, 'menu_present', False))}",
-        f"Booking: {bool_to_yes_no(safe_getattr(result, 'booking_present', False))}",
-        f"Delivery: {bool_to_yes_no(safe_getattr(result, 'delivery_present', False))}",
-        f"Data capture: {bool_to_yes_no(safe_getattr(result, 'data_capture_present', False))}",
-        f"Contact info: {bool_to_yes_no(safe_getattr(result, 'contact_present', False))}",
-        f"Website creator: {safe_text(safe_getattr(result, 'website_creator', '') or 'N/A')}",
-        "",
-
-        f"Instagram: {chunk_long_text(safe_getattr(result, 'instagram', '') or 'Not found')}",
-        f"Facebook: {chunk_long_text(safe_getattr(result, 'facebook', '') or 'Not found')}",
-        f"TikTok: {chunk_long_text(safe_getattr(result, 'tiktok', '') or 'Not found')}",
-        f"Threads: {chunk_long_text(safe_getattr(result, 'threads', '') or 'Not found')}",
-        f"X: {chunk_long_text(safe_getattr(result, 'x', '') or 'Not found')}",
-        f"YouTube: {chunk_long_text(safe_getattr(result, 'youtube', '') or 'Not found')}",
-        f"Google Maps: {chunk_long_text(safe_getattr(result, 'google_maps_url', '') or 'Not found')}",
-        "",
-
-        f"TheFork: {chunk_long_text(safe_getattr(result, 'thefork_url', '') or 'Not found')}",
-        f"TripAdvisor: {chunk_long_text(safe_getattr(result, 'tripadvisor_url', '') or 'Not found')}",
-        f"OpenTable: {chunk_long_text(safe_getattr(result, 'opentable_url', '') or 'Not found')}",
-        f"Other directory links: {chunk_long_text(safe_getattr(result, 'directory_links_json', '') or '[]')}",
-        "",
-
-        f"Restaurant match: {bool_to_yes_no(safe_getattr(result, 'is_restaurant_match', False))}",
-        f"Non-restaurant reason: {safe_text(safe_getattr(result, 'non_restaurant_reason', '') or 'N/A')}",
-        f"Source: {safe_text(safe_getattr(result, 'source', '') or 'N/A')}",
-        f"Evidence: {chunk_long_text(safe_getattr(result, 'evidence', '') or 'N/A', 85)}",
+        f"Confidence: {normalize_value('confidence', get_attr(result, 'confidence', ''))}",
+        f"Source: {safe_text(get_attr(result, 'source', '') or 'N/A')}",
+        f"Evidence: {chunk_long_text(get_attr(result, 'evidence', '') or 'N/A', 85)}",
     ]
 
     for line in lines:
@@ -754,13 +630,11 @@ def hubspot_upload_file(file_path: str, file_name: str) -> Optional[str]:
     options = '{"access":"PRIVATE"}'
 
     with open(file_path, "rb") as f:
-        files = {
-            "file": (file_name, f, "application/pdf")
-        }
+        files = {"file": (file_name, f, "application/pdf")}
         data = {
             "fileName": file_name,
             "folderPath": "/online-presence-reports",
-            "options": options,
+            "options": options
         }
 
         r = requests.post(url, headers=headers, files=files, data=data, timeout=60)
@@ -771,8 +645,7 @@ def hubspot_upload_file(file_path: str, file_name: str) -> Optional[str]:
         print(r.text)
 
     r.raise_for_status()
-    uploaded = r.json()
-    return uploaded.get("id")
+    return r.json().get("id")
 
 
 def build_missing_requirements_note(name: str, city: str, country: str) -> str:
@@ -809,10 +682,6 @@ def process_one_company(company: Dict[str, Any], ws, existing_ids: set[str]) -> 
 
     print("DEBUG record:", record_id)
     print("DEBUG props:", props)
-    print("DEBUG company field:", name_company)
-    print("DEBUG firstname field:", firstname)
-    print("DEBUG lastname field:", lastname)
-    print("DEBUG contact_name:", contact_name)
     print("DEBUG final name:", name)
     print("DEBUG city:", city)
     print("DEBUG country:", country)
@@ -822,8 +691,6 @@ def process_one_company(company: Dict[str, Any], ws, existing_ids: set[str]) -> 
         return
 
     if not name or not city:
-        print(f"Record {record_id}: missing requirements, creating simple note and sheet row")
-
         note_body = build_missing_requirements_note(name, city, country)
 
         upsert_company_result(
@@ -835,11 +702,10 @@ def process_one_company(company: Dict[str, Any], ws, existing_ids: set[str]) -> 
             result=None,
             status_override="no_requirements",
             needs_review_override="true",
-            evidence_override="Missing required fields: name and/or city",
+            evidence_override="Missing required fields: name and/or city"
         )
 
         existing_ids.add(str(record_id))
-
         note_id = hubspot_create_note_for_contact(record_id, note_body, attachment_ids=[])
         print(f"Created simple note {note_id} for record {record_id} without PDF")
         return
@@ -853,7 +719,7 @@ def process_one_company(company: Dict[str, Any], ws, existing_ids: set[str]) -> 
         name=name,
         city=city,
         country=country,
-        result=result,
+        result=result
     )
 
     safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name)
@@ -876,17 +742,13 @@ def process_one_company(company: Dict[str, Any], ws, existing_ids: set[str]) -> 
         country=country,
         result=result,
         hubspot_file_id=file_id,
-        pdf_url=pdf_url or "",
+        pdf_url=pdf_url or ""
     )
 
     existing_ids.add(str(record_id))
 
     attachment_ids = [file_id] if file_id else []
-    note_id = hubspot_create_note_for_contact(
-        record_id,
-        note_body,
-        attachment_ids=attachment_ids,
-    )
+    note_id = hubspot_create_note_for_contact(record_id, note_body, attachment_ids=attachment_ids)
 
     print(f"Created note {note_id} for record {record_id} with PDF attachment {file_id}")
     print(f"PDF URL saved to Google Sheet: {pdf_url}")
