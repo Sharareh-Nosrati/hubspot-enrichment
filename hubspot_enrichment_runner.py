@@ -38,7 +38,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-# Exact Excel schema order
 RESULT_FIELDS = [
     "hubspot_company_id",
     "name",
@@ -146,10 +145,59 @@ def hs_headers() -> Dict[str, str]:
     }
 
 
-def get_attr(result: Any, key: str, default: Any = "") -> Any:
-    if result is None:
+def get_attr(obj: Any, key: str, default: Any = "") -> Any:
+    if obj is None:
         return default
-    return getattr(result, key, default)
+    return getattr(obj, key, default)
+
+
+def safe_text(value: Any) -> str:
+    if value is None:
+        return ""
+
+    text = str(value)
+
+    replacements = {
+        "→": "->",
+        "←": "<-",
+        "•": "-",
+        "–": "-",
+        "—": "-",
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "…": "...",
+        "\u00a0": " ",
+        "\r": " ",
+        "\n": " ",
+        "\t": " ",
+    }
+
+    for bad, good in replacements.items():
+        text = text.replace(bad, good)
+
+    text = " ".join(text.split())
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
+def bool_to_yes_no(value: Any) -> str:
+    return "Yes" if bool(value) else "No"
+
+
+def yes_no_or_blank(value: Any) -> str:
+    if value in ("", None):
+        return ""
+    return "Yes" if bool(value) else "No"
+
+
+def pct_from_score(value: Any) -> str:
+    if value in ("", None):
+        return ""
+    try:
+        return f"{round(float(value) * 100, 1)}%"
+    except Exception:
+        return ""
 
 
 def normalize_value(key: str, value: Any) -> str:
@@ -214,9 +262,9 @@ def normalize_value(key: str, value: Any) -> str:
         try:
             return json.dumps(value, ensure_ascii=False)
         except Exception:
-            return str(value)
+            return safe_text(value)
 
-    return str(value)
+    return safe_text(value)
 
 
 def excel_col_letter(col_num: int) -> str:
@@ -309,7 +357,7 @@ def compute_status(result) -> str:
         return "no_requirements"
 
     status = "ok"
-    evidence_text = get_attr(result, "evidence", "") or ""
+    evidence_text = safe_text(get_attr(result, "evidence", "") or "")
 
     if get_attr(result, "needs_review", False):
         status = "needs_review"
@@ -326,19 +374,6 @@ def compute_status(result) -> str:
         status = "error"
 
     return status
-
-
-def hubspot_get_signed_file_url(file_id: str) -> Optional[str]:
-    url = f"{BASE_URL}/files/v3/files/{file_id}/signed-url"
-    r = requests.get(url, headers=hs_headers(), timeout=30)
-
-    if not r.ok:
-        print("HubSpot signed URL error:")
-        print(r.status_code)
-        print(r.text)
-        return None
-
-    return r.json().get("url")
 
 
 def build_row(
@@ -374,8 +409,14 @@ def build_row(
 
     for key in RESULT_FIELDS:
         if key in {
-            "hubspot_company_id", "name", "city", "country",
-            "last_checked", "hubspot_file_id", "pdf_url", "status"
+            "hubspot_company_id",
+            "name",
+            "city",
+            "country",
+            "last_checked",
+            "hubspot_file_id",
+            "pdf_url",
+            "status",
         }:
             continue
         row_data[key] = get_attr(result, key, "")
@@ -452,6 +493,19 @@ def hubspot_list_contacts(limit: int = 2) -> List[Dict[str, Any]]:
     return r.json().get("results", [])
 
 
+def hubspot_get_signed_file_url(file_id: str) -> Optional[str]:
+    url = f"{BASE_URL}/files/v3/files/{file_id}/signed-url"
+    r = requests.get(url, headers=hs_headers(), timeout=30)
+
+    if not r.ok:
+        print("HubSpot signed URL error:")
+        print(r.status_code)
+        print(r.text)
+        return None
+
+    return r.json().get("url")
+
+
 def hubspot_create_note_for_contact(
     record_id: str,
     note_body: str,
@@ -493,140 +547,11 @@ def hubspot_create_note_for_contact(
     return r.json().get("id")
 
 
-def bool_to_yes_no(value: bool) -> str:
-    return "Yes" if value else "No"
-
-
-def html_link(url: str, label: str) -> str:
-    if not url:
-        return "Not found"
-    return f'<a href="{url}" target="_blank" rel="noopener noreferrer">{label}</a>'
-
-
-def build_note_body(result, name: str, city: str, country: str) -> str:
-    status = compute_status(result)
-
-    return (
-        f"<b>Online Presence Analysis</b><br><br>"
-        f"<b>Lead:</b> {name or 'N/A'}<br>"
-        f"<b>City:</b> {city or 'N/A'}<br>"
-        f"<b>Country:</b> {country or 'N/A'}<br>"
-        f"<b>Confidence:</b> {normalize_value('confidence', get_attr(result, 'confidence', ''))}<br>"
-        f"<b>Status:</b> {status}<br>"
-        f"<b>Needs review:</b> {bool_to_yes_no(get_attr(result, 'needs_review', False))}<br>"
-        f"<b>Website:</b> {html_link(get_attr(result, 'website', ''), 'Open website')}<br>"
-        f"<b>Instagram:</b> {html_link(get_attr(result, 'instagram', ''), 'Open Instagram')}<br>"
-        f"<b>Facebook:</b> {html_link(get_attr(result, 'facebook', ''), 'Open Facebook')}<br>"
-        f"<b>TikTok:</b> {html_link(get_attr(result, 'tiktok', ''), 'Open TikTok')}<br>"
-        f"<b>Google Maps:</b> {html_link(get_attr(result, 'google_maps_url', ''), 'Open Google Maps')}<br>"
-        f"<b>Menu:</b> {bool_to_yes_no(get_attr(result, 'menu_present', False))}<br>"
-        f"<b>Booking:</b> {bool_to_yes_no(get_attr(result, 'booking_present', False))}<br>"
-        f"<b>Delivery:</b> {bool_to_yes_no(get_attr(result, 'delivery_present', False))}<br>"
-        f"<b>Data capture:</b> {bool_to_yes_no(get_attr(result, 'data_capture_present', False))}<br>"
-        f"<b>Contact info:</b> {bool_to_yes_no(get_attr(result, 'contact_present', False))}<br>"
-        f"<b>Website creator:</b> {get_attr(result, 'website_creator', '') or 'N/A'}<br>"
-        f"<b>Source:</b> {get_attr(result, 'source', '') or 'N/A'}"
-    )
-
-
-def safe_text(value) -> str:
-    if value is None:
-        return ""
-
-    text = str(value)
-    replacements = {
-        "→": "->",
-        "←": "<-",
-        "•": "-",
-        "–": "-",
-        "—": "-",
-        "“": '"',
-        "”": '"',
-        "‘": "'",
-        "’": "'",
-        "…": "...",
-        "\u00a0": " ",
-    }
-
-    for bad, good in replacements.items():
-        text = text.replace(bad, good)
-
-    text = text.replace("\r", " ").replace("\n", " ").strip()
-    return text.encode("latin-1", errors="replace").decode("latin-1")
-
-
-def chunk_long_text(text: str, chunk_size: int = 90) -> str:
-    text = safe_text(text)
-    if not text:
-        return ""
-
-    parts = []
-    while len(text) > chunk_size:
-        parts.append(text[:chunk_size])
-        text = text[chunk_size:]
-    if text:
-        parts.append(text)
-
-    return "\n".join(parts)
-
-
-def make_pdf_for_result(record_id: str, name: str, city: str, country: str, result) -> str:
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.set_margins(left=15, top=15, right=15)
-    pdf.add_page()
-
-    usable_width = pdf.w - pdf.l_margin - pdf.r_margin
-
-    pdf.set_font("helvetica", "B", 14)
-    pdf.multi_cell(usable_width, 10, "Online Presence Analysis")
-    pdf.ln(2)
-
-    pdf.set_font("helvetica", "", 11)
-
-    lines = [
-        f"HubSpot Record ID: {safe_text(record_id)}",
-        f"Lead: {safe_text(name)}",
-        f"City: {safe_text(city)}",
-        f"Country: {safe_text(country)}",
-        f"Generated: {datetime.now(timezone.utc).isoformat()}",
-        "",
-        f"Website: {chunk_long_text(get_attr(result, 'website', '') or 'Not found')}",
-        f"Instagram: {chunk_long_text(get_attr(result, 'instagram', '') or 'Not found')}",
-        f"Facebook: {chunk_long_text(get_attr(result, 'facebook', '') or 'Not found')}",
-        f"TikTok: {chunk_long_text(get_attr(result, 'tiktok', '') or 'Not found')}",
-        f"Threads: {chunk_long_text(get_attr(result, 'threads', '') or 'Not found')}",
-        f"X: {chunk_long_text(get_attr(result, 'x', '') or 'Not found')}",
-        f"YouTube: {chunk_long_text(get_attr(result, 'youtube', '') or 'Not found')}",
-        f"Google Maps: {chunk_long_text(get_attr(result, 'google_maps_url', '') or 'Not found')}",
-        "",
-        f"Menu: {bool_to_yes_no(get_attr(result, 'menu_present', False))}",
-        f"Booking: {bool_to_yes_no(get_attr(result, 'booking_present', False))}",
-        f"Delivery: {bool_to_yes_no(get_attr(result, 'delivery_present', False))}",
-        f"Data capture: {bool_to_yes_no(get_attr(result, 'data_capture_present', False))}",
-        f"Contact info: {bool_to_yes_no(get_attr(result, 'contact_present', False))}",
-        f"Website creator: {safe_text(get_attr(result, 'website_creator', '') or 'N/A')}",
-        "",
-        f"Confidence: {normalize_value('confidence', get_attr(result, 'confidence', ''))}",
-        f"Source: {safe_text(get_attr(result, 'source', '') or 'N/A')}",
-        f"Evidence: {chunk_long_text(get_attr(result, 'evidence', '') or 'N/A', 85)}",
-    ]
-
-    for line in lines:
-        pdf.multi_cell(usable_width, 8, safe_text(line))
-        pdf.ln(1)
-
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    tmp_path = tmp.name
-    tmp.close()
-
-    pdf.output(tmp_path)
-    return tmp_path
-
-
 def hubspot_upload_file(file_path: str, file_name: str) -> Optional[str]:
     url = f"{BASE_URL}/files/v3/files"
-    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}"}
+    headers = {
+        "Authorization": f"Bearer {HUBSPOT_TOKEN}"
+    }
     options = '{"access":"PRIVATE"}'
 
     with open(file_path, "rb") as f:
@@ -648,16 +573,347 @@ def hubspot_upload_file(file_path: str, file_name: str) -> Optional[str]:
     return r.json().get("id")
 
 
+def html_link(url: str, label: str) -> str:
+    if not url:
+        return "Not found"
+    return f'<a href="{safe_text(url)}" target="_blank" rel="noopener noreferrer">{safe_text(label)}</a>'
+
+
 def build_missing_requirements_note(name: str, city: str, country: str) -> str:
     return (
         f"<b>Online Presence Analysis</b><br><br>"
         f"<b>Status:</b> no_requirements<br>"
         f"<b>Needs review:</b> Yes<br>"
         f"<b>Reason:</b> Missing required fields for analysis<br><br>"
-        f"<b>Name:</b> {name or 'Missing'}<br>"
-        f"<b>City:</b> {city or 'Missing'}<br>"
-        f"<b>Country:</b> {country or 'Missing'}"
+        f"<b>Name:</b> {safe_text(name or 'Missing')}<br>"
+        f"<b>City:</b> {safe_text(city or 'Missing')}<br>"
+        f"<b>Country:</b> {safe_text(country or 'Missing')}"
     )
+
+
+def note_link_row(label: str, url: str, score_pct: str, needs_review: str, match: str, source: str) -> str:
+    return (
+        f"<b>{safe_text(label)}:</b> {html_link(url, 'Open link')} | "
+        f"Confidence: {safe_text(score_pct or '-')} | "
+        f"Needs review: {safe_text(needs_review)} | "
+        f"Restaurant match: {safe_text(match)} | "
+        f"Source: {safe_text(source or '-')}"
+    )
+
+
+def build_note_body(result, name: str, city: str, country: str) -> str:
+    overall_pct = pct_from_score(get_attr(result, "confidence", "")) or "-"
+    needs_review = bool_to_yes_no(get_attr(result, "needs_review", False))
+    restaurant_match = bool_to_yes_no(get_attr(result, "is_restaurant_match", False))
+    generated_at = datetime.now(timezone.utc).isoformat()
+
+    rows = [
+        note_link_row(
+            "Website",
+            get_attr(result, "website", ""),
+            pct_from_score(get_attr(result, "website_score", "")),
+            needs_review,
+            restaurant_match,
+            get_attr(result, "website_found_from", "") or get_attr(result, "source", ""),
+        ),
+        note_link_row(
+            "Instagram",
+            get_attr(result, "instagram", ""),
+            pct_from_score(get_attr(result, "instagram_score", "")),
+            needs_review,
+            restaurant_match,
+            get_attr(result, "instagram_found_from", ""),
+        ),
+        note_link_row(
+            "Facebook",
+            get_attr(result, "facebook", ""),
+            pct_from_score(get_attr(result, "facebook_score", "")),
+            needs_review,
+            restaurant_match,
+            get_attr(result, "facebook_found_from", ""),
+        ),
+        note_link_row(
+            "X",
+            get_attr(result, "x", ""),
+            pct_from_score(get_attr(result, "x_score", "")),
+            needs_review,
+            restaurant_match,
+            get_attr(result, "x_found_from", ""),
+        ),
+        note_link_row(
+            "TikTok",
+            get_attr(result, "tiktok", ""),
+            pct_from_score(get_attr(result, "tiktok_score", "")),
+            needs_review,
+            restaurant_match,
+            get_attr(result, "tiktok_found_from", ""),
+        ),
+        note_link_row(
+            "Google Maps",
+            get_attr(result, "google_maps_url", ""),
+            overall_pct,
+            needs_review,
+            restaurant_match,
+            get_attr(result, "source", ""),
+        ),
+        note_link_row(
+            "TheFork",
+            get_attr(result, "thefork_url", ""),
+            overall_pct,
+            needs_review,
+            restaurant_match,
+            get_attr(result, "source", ""),
+        ),
+        note_link_row(
+            "Tripadvisor",
+            get_attr(result, "tripadvisor_url", ""),
+            overall_pct,
+            needs_review,
+            restaurant_match,
+            get_attr(result, "source", ""),
+        ),
+    ]
+
+    extra_links = []
+    for label, key in [
+        ("Threads", "threads"),
+        ("YouTube", "youtube"),
+        ("Linktree", "linktree"),
+        ("uqr.to", "uqrto"),
+        ("JustEat", "justeat_url"),
+        ("Deliveroo", "deliveroo_url"),
+        ("Glovo", "glovo_url"),
+        ("Restaurant Guru", "restaurantguru_url"),
+        ("OpenTable", "opentable_url"),
+        ("Quandoo", "quandoo_url"),
+    ]:
+        val = get_attr(result, key, "")
+        if val:
+            extra_links.append(f"{safe_text(label)}: {html_link(val, 'Open link')}")
+
+    other_extra_links = "<br>".join(extra_links) if extra_links else "Not found"
+
+    return (
+        f"<b>Online Presence Analysis HubSpot</b><br><br>"
+        f"<b>Record ID:</b> {safe_text(name)}<br>"
+        f"<b>Restaurant:</b> {safe_text(name)}<br>"
+        f"<b>City:</b> {safe_text(city)}<br>"
+        f"<b>Country:</b> {safe_text(country)}<br>"
+        f"<b>Total score:</b> {overall_pct}<br>"
+        f"<b>Generated at:</b> {safe_text(generated_at)}<br><br>"
+
+        f"<b>Social media links</b><br>"
+        f"{'<br>'.join(rows)}<br><br>"
+
+        f"<b>Website</b><br>"
+        f"Menu: {bool_to_yes_no(get_attr(result, 'menu_present', False))}<br>"
+        f"Booking Online: {bool_to_yes_no(get_attr(result, 'booking_present', False))}<br>"
+        f"Delivery: {bool_to_yes_no(get_attr(result, 'delivery_present', False))}<br>"
+        f"Data Capture: {bool_to_yes_no(get_attr(result, 'data_capture_present', False))}<br>"
+        f"Contact Info: {bool_to_yes_no(get_attr(result, 'contact_present', False))}<br>"
+        f"Website creator: {safe_text(get_attr(result, 'website_creator', '') or 'Not found')}<br><br>"
+
+        f"<b>Extra data</b><br>"
+        f"non_restaurant_reason: {safe_text(get_attr(result, 'non_restaurant_reason', '') or 'Not found')}<br>"
+        f"Other extra links: {other_extra_links}<br>"
+    )
+
+
+class ReportPDF(FPDF):
+    pass
+
+
+def pdf_full_width(pdf: FPDF) -> float:
+    return pdf.w - pdf.l_margin - pdf.r_margin
+
+
+def pdf_title(pdf: FPDF, text: str) -> None:
+    pdf.set_font("helvetica", "B", 14)
+    pdf.cell(pdf_full_width(pdf), 10, safe_text(text), border=1, ln=1, align="C")
+
+
+def pdf_section_title(pdf: FPDF, text: str) -> None:
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(pdf_full_width(pdf), 9, safe_text(text), border=1, ln=1, align="C")
+
+
+def pdf_two_col_row(pdf: FPDF, left: str, right: str, left_w: float = 70) -> None:
+    total_w = pdf_full_width(pdf)
+    right_w = total_w - left_w
+    y = pdf.get_y()
+    x = pdf.get_x()
+
+    pdf.set_font("helvetica", "", 11)
+    left_h = max(8, 6 * max(1, len(safe_text(left)) // 35 + 1))
+    right_h = max(8, 6 * max(1, len(safe_text(right)) // 55 + 1))
+    row_h = max(left_h, right_h)
+
+    pdf.multi_cell(left_w, row_h, safe_text(left), border=1, align="C")
+    pdf.set_xy(x + left_w, y)
+    pdf.multi_cell(right_w, row_h, safe_text(right), border=1, align="C")
+
+
+def pdf_table_header(pdf: FPDF, widths: List[float], headers: List[str]) -> None:
+    pdf.set_font("helvetica", "B", 10)
+    for w, h in zip(widths, headers):
+        pdf.cell(w, 8, safe_text(h), border=1, align="C")
+    pdf.ln()
+
+
+def pdf_table_row(pdf: FPDF, widths: List[float], cells: List[str]) -> None:
+    pdf.set_font("helvetica", "", 9)
+    line_counts = []
+    for txt, w in zip(cells, widths):
+        approx = max(1, len(safe_text(txt)) // max(8, int(w / 1.8)) + 1)
+        line_counts.append(approx)
+    row_h = max(8, max(line_counts) * 5)
+
+    x0 = pdf.get_x()
+    y0 = pdf.get_y()
+
+    current_x = x0
+    for w, txt in zip(widths, cells):
+        pdf.set_xy(current_x, y0)
+        pdf.multi_cell(w, row_h, safe_text(txt), border=1, align="C")
+        current_x += w
+
+    pdf.set_xy(x0, y0 + row_h)
+
+
+def make_pdf_for_result(record_id: str, name: str, city: str, country: str, result) -> str:
+    pdf = ReportPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=10)
+    pdf.set_margins(left=8, top=8, right=8)
+    pdf.add_page()
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+    overall_pct = pct_from_score(get_attr(result, "confidence", "")) or "-"
+
+    pdf_title(pdf, "Online Presence Analysis HubSpot")
+
+    pdf_two_col_row(pdf, "Record ID:", record_id)
+    pdf_two_col_row(pdf, "Restaurant:", name)
+    pdf_two_col_row(pdf, "City:", city)
+    pdf_two_col_row(pdf, "Country:", country)
+
+    pdf_section_title(pdf, "Social media links")
+
+    widths = [55, 90, 28, 28, 28, 42]
+    pdf_table_header(
+        pdf,
+        widths,
+        ["Link type", "Link", "Score confidence", "Needs review", "Restaurant Match", "Source"]
+    )
+
+    needs_review = bool_to_yes_no(get_attr(result, "needs_review", False))
+    restaurant_match = bool_to_yes_no(get_attr(result, "is_restaurant_match", False))
+
+    link_rows = [
+        [
+            "website",
+            get_attr(result, "website", "") or "Not found",
+            pct_from_score(get_attr(result, "website_score", "")) or "-",
+            needs_review,
+            restaurant_match,
+            get_attr(result, "website_found_from", "") or get_attr(result, "source", "") or "-",
+        ],
+        [
+            "Instagram",
+            get_attr(result, "instagram", "") or "Not found",
+            pct_from_score(get_attr(result, "instagram_score", "")) or "-",
+            needs_review,
+            restaurant_match,
+            get_attr(result, "instagram_found_from", "") or "-",
+        ],
+        [
+            "facebook",
+            get_attr(result, "facebook", "") or "Not found",
+            pct_from_score(get_attr(result, "facebook_score", "")) or "-",
+            needs_review,
+            restaurant_match,
+            get_attr(result, "facebook_found_from", "") or "-",
+        ],
+        [
+            "X",
+            get_attr(result, "x", "") or "Not found",
+            pct_from_score(get_attr(result, "x_score", "")) or "-",
+            needs_review,
+            restaurant_match,
+            get_attr(result, "x_found_from", "") or "-",
+        ],
+        [
+            "TikTok",
+            get_attr(result, "tiktok", "") or "Not found",
+            pct_from_score(get_attr(result, "tiktok_score", "")) or "-",
+            needs_review,
+            restaurant_match,
+            get_attr(result, "tiktok_found_from", "") or "-",
+        ],
+        [
+            "google maps",
+            get_attr(result, "google_maps_url", "") or "Not found",
+            overall_pct,
+            needs_review,
+            restaurant_match,
+            get_attr(result, "source", "") or "-",
+        ],
+        [
+            "Thefork",
+            get_attr(result, "thefork_url", "") or "Not found",
+            overall_pct,
+            needs_review,
+            restaurant_match,
+            get_attr(result, "source", "") or "-",
+        ],
+        [
+            "tripadvisor",
+            get_attr(result, "tripadvisor_url", "") or "Not found",
+            overall_pct,
+            needs_review,
+            restaurant_match,
+            get_attr(result, "source", "") or "-",
+        ],
+    ]
+
+    for row in link_rows:
+        pdf_table_row(pdf, widths, row)
+
+    pdf_section_title(pdf, "website")
+    pdf_two_col_row(pdf, "menu", bool_to_yes_no(get_attr(result, "menu_present", False)))
+    pdf_two_col_row(pdf, "Booking Online", bool_to_yes_no(get_attr(result, "booking_present", False)))
+    pdf_two_col_row(pdf, "Delivery", bool_to_yes_no(get_attr(result, "delivery_present", False)))
+    pdf_two_col_row(pdf, "Data Capture", bool_to_yes_no(get_attr(result, "data_capture_present", False)))
+    pdf_two_col_row(pdf, "Contact Info", bool_to_yes_no(get_attr(result, "contact_present", False)))
+    pdf_two_col_row(pdf, "Website creator", get_attr(result, "website_creator", "") or "Not found")
+
+    pdf_section_title(pdf, "Extra data")
+    pdf_two_col_row(pdf, "non_restaurant_reason", get_attr(result, "non_restaurant_reason", "") or "Not found")
+    pdf_two_col_row(pdf, "Generated at", generated_at)
+
+    extra_links = []
+    for label, key in [
+        ("Threads", "threads"),
+        ("YouTube", "youtube"),
+        ("Linktree", "linktree"),
+        ("uqr.to", "uqrto"),
+        ("JustEat", "justeat_url"),
+        ("Deliveroo", "deliveroo_url"),
+        ("Glovo", "glovo_url"),
+        ("Restaurant Guru", "restaurantguru_url"),
+        ("OpenTable", "opentable_url"),
+        ("Quandoo", "quandoo_url"),
+    ]:
+        val = get_attr(result, key, "")
+        if val:
+            extra_links.append(f"{label}: {val}")
+
+    pdf_two_col_row(pdf, "other extra links", " | ".join(extra_links) if extra_links else "Not found")
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    tmp_path = tmp.name
+    tmp.close()
+    pdf.output(tmp_path)
+    return tmp_path
 
 
 def process_one_company(company: Dict[str, Any], ws, existing_ids: set[str]) -> None:
@@ -667,7 +923,6 @@ def process_one_company(company: Dict[str, Any], ws, existing_ids: set[str]) -> 
     name_company = (props.get("company") or "").strip()
     firstname = (props.get("firstname") or "").strip()
     lastname = (props.get("lastname") or "").strip()
-
     contact_name = " ".join(part for part in [firstname, lastname] if part).strip()
 
     if name_company and contact_name:
@@ -711,7 +966,6 @@ def process_one_company(company: Dict[str, Any], ws, existing_ids: set[str]) -> 
         return
 
     result = resolve_one(name, city, country)
-
     note_body = build_note_body(result, name, city, country)
 
     pdf_path = make_pdf_for_result(
@@ -748,7 +1002,11 @@ def process_one_company(company: Dict[str, Any], ws, existing_ids: set[str]) -> 
     existing_ids.add(str(record_id))
 
     attachment_ids = [file_id] if file_id else []
-    note_id = hubspot_create_note_for_contact(record_id, note_body, attachment_ids=attachment_ids)
+    note_id = hubspot_create_note_for_contact(
+        record_id=str(record_id),
+        note_body=note_body,
+        attachment_ids=attachment_ids
+    )
 
     print(f"Created note {note_id} for record {record_id} with PDF attachment {file_id}")
     print(f"PDF URL saved to Google Sheet: {pdf_url}")
