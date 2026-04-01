@@ -125,6 +125,17 @@ RESULT_FIELDS = [
     "delivery_present",
     "data_capture_present",
     "contact_present",
+    "website_type",
+    "directions_present",
+    "reviews_visible",
+    "offers_promos_present",
+    "events_present",
+    "menu_quality",
+    "unique_value_present",
+    "unique_value_examples_json",
+    "website_completeness_score",
+    "website_strengths_json",
+    "website_weaknesses_json",
     "is_restaurant_match",
     "non_restaurant_reason",
     "tiktok_present",
@@ -181,14 +192,26 @@ def safe_text(value: Any) -> str:
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
+def to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y"}
+    return bool(value)
+
+
 def bool_to_yes_no(value: Any) -> str:
-    return "Yes" if bool(value) else "No"
+    return "Yes" if to_bool(value) else "No"
 
 
 def yes_no_or_blank(value: Any) -> str:
     if value in ("", None):
         return ""
-    return "Yes" if bool(value) else "No"
+    return "Yes" if to_bool(value) else "No"
 
 
 def pct_from_score(value: Any) -> str:
@@ -219,6 +242,11 @@ def normalize_value(key: str, value: Any) -> str:
         "delivery_present",
         "data_capture_present",
         "contact_present",
+        "directions_present",
+        "reviews_visible",
+        "offers_promos_present",
+        "events_present",
+        "unique_value_present",
         "is_restaurant_match",
         "tiktok_present",
     }
@@ -235,6 +263,7 @@ def normalize_value(key: str, value: Any) -> str:
         "linktree_score",
         "uqrto_score",
         "confidence",
+        "website_completeness_score",
     }
 
     json_fields = {
@@ -242,13 +271,16 @@ def normalize_value(key: str, value: Any) -> str:
         "facebook_bio_links_json",
         "directory_links_json",
         "official_website_candidates_json",
+        "unique_value_examples_json",
+        "website_strengths_json",
+        "website_weaknesses_json",
     }
 
     if value is None:
         return ""
 
     if key in bool_fields:
-        return str(bool(value)).lower()
+        return "true" if to_bool(value) else "false"
 
     if key in float_fields:
         try:
@@ -359,7 +391,7 @@ def compute_status(result) -> str:
     status = "ok"
     evidence_text = safe_text(get_attr(result, "evidence", "") or "")
 
-    if get_attr(result, "needs_review", False):
+    if to_bool(get_attr(result, "needs_review", False)):
         status = "needs_review"
 
     if (
@@ -591,16 +623,6 @@ def build_missing_requirements_note(name: str, city: str, country: str) -> str:
     )
 
 
-def note_link_row(label: str, url: str, score_pct: str, needs_review: str, match: str, source: str) -> str:
-    return (
-        f"<b>{safe_text(label)}:</b> {html_link(url, 'Open link')} | "
-        f"Confidence: {safe_text(score_pct or '-')} | "
-        f"Needs review: {safe_text(needs_review)} | "
-        f"Restaurant match: {safe_text(match)} | "
-        f"Source: {safe_text(source or '-')}"
-    )
-
-
 def build_note_body(result, record_id: str, name: str, city: str, country: str) -> str:
     def pct(v):
         try:
@@ -614,7 +636,7 @@ def build_note_body(result, record_id: str, name: str, city: str, country: str) 
 
     rows = [
         (
-            "website",
+            "Website",
             getattr(result, "website", ""),
             pct(getattr(result, "website_score", "")),
             needs_review_txt,
@@ -654,7 +676,7 @@ def build_note_body(result, record_id: str, name: str, city: str, country: str) 
             getattr(result, "tiktok_found_from", "")
         ),
         (
-            "google maps",
+            "Google Maps",
             getattr(result, "google_maps_url", ""),
             pct(getattr(result, "confidence", "")),
             needs_review_txt,
@@ -662,7 +684,7 @@ def build_note_body(result, record_id: str, name: str, city: str, country: str) 
             getattr(result, "source", "")
         ),
         (
-            "The fork",
+            "TheFork",
             getattr(result, "thefork_url", ""),
             pct(getattr(result, "confidence", "")),
             needs_review_txt,
@@ -709,6 +731,17 @@ def build_note_body(result, record_id: str, name: str, city: str, country: str) 
 
     other_extra_links = "<br>".join(extra_links) if extra_links else "Not found"
 
+    website_strengths = []
+    website_weaknesses = []
+    try:
+        website_strengths = json.loads(getattr(result, "website_strengths_json", "[]") or "[]")
+    except Exception:
+        website_strengths = []
+    try:
+        website_weaknesses = json.loads(getattr(result, "website_weaknesses_json", "[]") or "[]")
+    except Exception:
+        website_weaknesses = []
+
     return (
         f"<b>Online Presence Analysis HubSpot</b><br><br>"
         f"<b>Record ID:</b> {safe_text(record_id)}<br>"
@@ -716,15 +749,27 @@ def build_note_body(result, record_id: str, name: str, city: str, country: str) 
         f"<b>City:</b> {safe_text(city)}<br>"
         f"<b>Country:</b> {safe_text(country)}<br><br>"
 
-        f"<b>Social media links:</b><br>"
+        f"<b>Digital links:</b><br>"
         f"{links_html}<br>"
 
-        f"<b>website:</b><br>"
-        f"menu: {bool_to_yes_no(getattr(result, 'menu_present', False))}<br>"
+        f"<b>Website analysis:</b><br>"
+        f"Website type: {safe_text(getattr(result, 'website_type', '') or 'Unknown')}<br>"
+        f"Website completeness score: {pct(getattr(result, 'website_completeness_score', '')) or '-'}<br>"
+        f"Menu: {bool_to_yes_no(getattr(result, 'menu_present', False))}<br>"
+        f"Menu quality: {safe_text(getattr(result, 'menu_quality', '') or '-')}<br>"
         f"Booking Online: {bool_to_yes_no(getattr(result, 'booking_present', False))}<br>"
         f"Delivery: {bool_to_yes_no(getattr(result, 'delivery_present', False))}<br>"
         f"Data Capture: {bool_to_yes_no(getattr(result, 'data_capture_present', False))}<br>"
-        f"Contact Info: {bool_to_yes_no(getattr(result, 'contact_present', False))}<br><br>"
+        f"Contact Info: {bool_to_yes_no(getattr(result, 'contact_present', False))}<br>"
+        f"Directions visible: {bool_to_yes_no(getattr(result, 'directions_present', False))}<br>"
+        f"Reviews visible: {bool_to_yes_no(getattr(result, 'reviews_visible', False))}<br>"
+        f"Offers/Promos: {bool_to_yes_no(getattr(result, 'offers_promos_present', False))}<br>"
+        f"Events: {bool_to_yes_no(getattr(result, 'events_present', False))}<br>"
+        f"Unique identity explained: {bool_to_yes_no(getattr(result, 'unique_value_present', False))}<br>"
+        f"Website creator: {safe_text(getattr(result, 'website_creator', '') or '-')}<br>"
+        f"Website platform: {safe_text(getattr(result, 'website_platform', '') or '-')}<br>"
+        f"Website strengths: {safe_text(' | '.join(website_strengths) if website_strengths else '-')}<br>"
+        f"Website weaknesses: {safe_text(' | '.join(website_weaknesses) if website_weaknesses else '-')}<br><br>"
 
         f"<b>Extra data</b><br>"
         f"non_restaurant reason: {safe_text(getattr(result, 'non_restaurant_reason', '') or '')}<br>"
@@ -757,38 +802,37 @@ def pdf_two_col_row(pdf: FPDF, left: str, right: str, left_w: float = 70) -> Non
     y = pdf.get_y()
     x = pdf.get_x()
 
-    pdf.set_font("helvetica", "", 11)
-    left_h = max(8, 6 * max(1, len(safe_text(left)) // 35 + 1))
-    right_h = max(8, 6 * max(1, len(safe_text(right)) // 55 + 1))
-    row_h = max(left_h, right_h)
+    pdf.set_font("helvetica", "", 10)
+    left_lines = max(1, len(safe_text(left)) // 30 + 1)
+    right_lines = max(1, len(safe_text(right)) // 55 + 1)
+    row_h = max(8, max(left_lines, right_lines) * 5)
 
+    pdf.set_xy(x, y)
     pdf.multi_cell(left_w, row_h, safe_text(left), border=1, align="C")
     pdf.set_xy(x + left_w, y)
     pdf.multi_cell(right_w, row_h, safe_text(right), border=1, align="C")
+    pdf.set_xy(x, y + row_h)
 
 
-def pdf_table_header(pdf: FPDF, widths: List[float], headers: List[str]) -> None:
-    pdf.set_font("helvetica", "B", 10)
-    for w, h in zip(widths, headers):
-        pdf.cell(w, 8, safe_text(h), border=1, align="C")
-    pdf.ln()
+def pdf_table_row(pdf: FPDF, widths: List[float], cells: List[str], bold: bool = False, align: str = "C") -> None:
+    pdf.set_font("helvetica", "B" if bold else "", 9)
 
-
-def pdf_table_row(pdf: FPDF, widths: List[float], cells: List[str]) -> None:
-    pdf.set_font("helvetica", "", 9)
     line_counts = []
     for txt, w in zip(cells, widths):
-        approx = max(1, len(safe_text(txt)) // max(8, int(w / 1.8)) + 1)
-        line_counts.append(approx)
+        text = safe_text(txt)
+        approx_chars_per_line = max(8, int(w / 2))
+        line_count = max(1, len(text) // approx_chars_per_line + 1)
+        line_counts.append(line_count)
+
     row_h = max(8, max(line_counts) * 5)
 
     x0 = pdf.get_x()
     y0 = pdf.get_y()
-
     current_x = x0
-    for w, txt in zip(widths, cells):
+
+    for txt, w in zip(cells, widths):
         pdf.set_xy(current_x, y0)
-        pdf.multi_cell(w, row_h, safe_text(txt), border=1, align="C")
+        pdf.multi_cell(w, row_h, safe_text(txt), border=1, align=align)
         current_x += w
 
     pdf.set_xy(x0, y0 + row_h)
@@ -804,7 +848,7 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
         return safe_text(v if v is not None else "")
 
     def yn(v):
-        return "Yes" if bool(v) else "No"
+        return "Yes" if to_bool(v) else "No"
 
     def pct(v):
         try:
@@ -814,46 +858,29 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
 
     page_w = pdf.w - pdf.l_margin - pdf.r_margin
 
-    # Column widths for the social table
-    col1 = 48   # label
-    col2 = 62   # link
-    col3 = 35   # score
-    col4 = 30   # needs review
-    col5 = 36   # restaurant match
-    col6 = page_w - (col1 + col2 + col3 + col4 + col5)  # source
-
-    def cell_row(values, widths, h=8, bold=False, align="C"):
-        pdf.set_font("helvetica", "B" if bold else "", 10)
-        for value, width in zip(values, widths):
-            pdf.cell(width, h, s(value), border=1, align=align)
-        pdf.ln(h)
-
-    def two_col_row(left, right, left_w=48, h=8, bold=False):
-        right_w = page_w - left_w
-        pdf.set_font("helvetica", "B" if bold else "", 10)
-        pdf.cell(left_w, h, s(left), border=1, align="C")
-        pdf.cell(right_w, h, s(right), border=1, align="C")
-        pdf.ln(h)
+    col1 = 48
+    col2 = 62
+    col3 = 35
+    col4 = 30
+    col5 = 36
+    col6 = page_w - (col1 + col2 + col3 + col4 + col5)
 
     generated_at = datetime.now(timezone.utc).isoformat()
 
-    # Header title
     pdf.set_font("helvetica", "B", 12)
     pdf.cell(page_w, 8, "Online Presence Analysis HubSpot", border=1, align="C")
     pdf.ln(8)
 
-    # Top info
-    two_col_row("Record ID:", record_id)
-    two_col_row("Restaurant:", name)
-    two_col_row("City:", city)
-    two_col_row("Country:", country)
+    pdf_two_col_row(pdf, "Record ID:", record_id, left_w=48)
+    pdf_two_col_row(pdf, "Restaurant:", name, left_w=48)
+    pdf_two_col_row(pdf, "City:", city, left_w=48)
+    pdf_two_col_row(pdf, "Country:", country, left_w=48)
 
-    # Social media section title
-    cell_row(
-        ["Social media links:", "links", "score confidence", "Needs review", "restaurant Match", "the source(How to find the link)"],
+    pdf_table_row(
+        pdf,
         [col1, col2, col3, col4, col5, col6],
-        h=8,
-        bold=False
+        ["Digital links", "Link", "Score confidence", "Needs review", "Restaurant match", "Source"],
+        bold=True
     )
 
     needs_review_txt = yn(getattr(result, "needs_review", False))
@@ -861,7 +888,7 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
 
     rows = [
         [
-            "website",
+            "Website",
             getattr(result, "website", "") or "",
             pct(getattr(result, "website_score", "")),
             needs_review_txt,
@@ -901,7 +928,7 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
             getattr(result, "tiktok_found_from", "")
         ],
         [
-            "google maps",
+            "Google Maps",
             getattr(result, "google_maps_url", "") or "",
             pct(getattr(result, "confidence", "")),
             needs_review_txt,
@@ -909,7 +936,7 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
             getattr(result, "source", "")
         ],
         [
-            "The fork",
+            "TheFork",
             getattr(result, "thefork_url", "") or "",
             pct(getattr(result, "confidence", "")),
             needs_review_txt,
@@ -927,20 +954,41 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
     ]
 
     for row in rows:
-        cell_row(row, [col1, col2, col3, col4, col5, col6], h=10, bold=False)
+        pdf_table_row(pdf, [col1, col2, col3, col4, col5, col6], row)
 
-    # Website section
     pdf.set_font("helvetica", "B", 11)
-    pdf.cell(page_w, 8, "website:", border=1, align="C")
+    pdf.cell(page_w, 8, "Website analysis", border=1, align="C")
     pdf.ln(8)
 
-    two_col_row("menu", yn(getattr(result, "menu_present", False)))
-    two_col_row("Booking Online", yn(getattr(result, "booking_present", False)))
-    two_col_row("Delivery", yn(getattr(result, "delivery_present", False)))
-    two_col_row("Data Capture", yn(getattr(result, "data_capture_present", False)))
-    two_col_row("Contact Info", yn(getattr(result, "contact_present", False)))
+    pdf_two_col_row(pdf, "Website type", getattr(result, "website_type", "") or "", left_w=55)
+    pdf_two_col_row(pdf, "Website completeness score", pct(getattr(result, "website_completeness_score", "")) or "", left_w=55)
+    pdf_two_col_row(pdf, "Menu", yn(getattr(result, "menu_present", False)), left_w=55)
+    pdf_two_col_row(pdf, "Menu quality", getattr(result, "menu_quality", "") or "", left_w=55)
+    pdf_two_col_row(pdf, "Booking Online", yn(getattr(result, "booking_present", False)), left_w=55)
+    pdf_two_col_row(pdf, "Delivery", yn(getattr(result, "delivery_present", False)), left_w=55)
+    pdf_two_col_row(pdf, "Data Capture", yn(getattr(result, "data_capture_present", False)), left_w=55)
+    pdf_two_col_row(pdf, "Contact Info", yn(getattr(result, "contact_present", False)), left_w=55)
+    pdf_two_col_row(pdf, "Directions visible", yn(getattr(result, "directions_present", False)), left_w=55)
+    pdf_two_col_row(pdf, "Reviews visible", yn(getattr(result, "reviews_visible", False)), left_w=55)
+    pdf_two_col_row(pdf, "Offers / Promos", yn(getattr(result, "offers_promos_present", False)), left_w=55)
+    pdf_two_col_row(pdf, "Events", yn(getattr(result, "events_present", False)), left_w=55)
+    pdf_two_col_row(pdf, "Unique identity explained", yn(getattr(result, "unique_value_present", False)), left_w=55)
+    pdf_two_col_row(pdf, "Website creator", getattr(result, "website_creator", "") or "", left_w=55)
+    pdf_two_col_row(pdf, "Website platform", getattr(result, "website_platform", "") or "", left_w=55)
 
-    # Extra data
+    try:
+        strengths = json.loads(getattr(result, "website_strengths_json", "[]") or "[]")
+    except Exception:
+        strengths = []
+
+    try:
+        weaknesses = json.loads(getattr(result, "website_weaknesses_json", "[]") or "[]")
+    except Exception:
+        weaknesses = []
+
+    pdf_two_col_row(pdf, "Website strengths", " | ".join(strengths) if strengths else "", left_w=55)
+    pdf_two_col_row(pdf, "Website weaknesses", " | ".join(weaknesses) if weaknesses else "", left_w=55)
+
     pdf.set_font("helvetica", "B", 11)
     pdf.cell(page_w, 8, "Extra data", border=1, align="C")
     pdf.ln(8)
@@ -962,9 +1010,9 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
         if value:
             extra_links.append(f"{label}: {value}")
 
-    two_col_row("non_restaurant reason", getattr(result, "non_restaurant_reason", "") or "")
-    two_col_row("Generated at", generated_at)
-    two_col_row("other extra links", " | ".join(extra_links) if extra_links else "")
+    pdf_two_col_row(pdf, "non_restaurant reason", getattr(result, "non_restaurant_reason", "") or "", left_w=55)
+    pdf_two_col_row(pdf, "Generated at", generated_at, left_w=55)
+    pdf_two_col_row(pdf, "other extra links", " | ".join(extra_links) if extra_links else "", left_w=55)
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     tmp_path = tmp.name
@@ -998,8 +1046,7 @@ def process_one_company(company: Dict[str, Any], ws, existing_ids: set[str]) -> 
     print("DEBUG country:", country)
 
     if already_processed(existing_ids, str(record_id)):
-        print(f"Skipping {record_id}: already processed in Google Sheet")
-        return
+        print(f"Record {record_id} already exists in Google Sheet - updating it.")
 
     if not name or not city:
         note_body = build_missing_requirements_note(name, city, country)
