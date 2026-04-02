@@ -218,6 +218,18 @@ class ResolveResult:
     data_capture_present: bool = False
     contact_present: bool = False
 
+    website_type: Optional[str] = None
+    directions_present: bool = False
+    reviews_visible: bool = False
+    offers_promos_present: bool = False
+    events_present: bool = False
+    menu_quality: Optional[str] = None
+    unique_value_present: bool = False
+    unique_value_examples_json: str = "[]"
+    website_completeness_score: float = 0.0
+    website_strengths_json: str = "[]"
+    website_weaknesses_json: str = "[]"
+
     is_restaurant_match: bool = False
     non_restaurant_reason: str = ""
     tiktok_present: bool = False
@@ -685,21 +697,19 @@ def clean_social_url(u: str) -> Optional[str]:
         if any(x in low for x in ["/posts/", "/photo.php", "/photos/", "/media/", "/mentions/", "/videos/"]):
             return None
 
-        m = re.search(
-            r"(https?://(?:www\.)?facebook\.com/(?!pages/|groups/|events/|watch/|share/|marketplace/)([A-Za-z0-9.\-_/]+))",
-            u,
-            flags=re.IGNORECASE,
-        )
+        m = re.search(r"(https?://(?:www\.)?facebook\.com/[^?#]+)", u, flags=re.IGNORECASE)
         if not m:
             return None
 
-        path = m.group(2).strip("/").lower()
+        cleaned = m.group(1).rstrip("/")
+        path = cleaned.split("facebook.com/")[-1].strip("/").lower()
         first_part = path.split("/")[0] if path else ""
-        bad_fb_paths = {"pages", "groups", "events", "watch", "share", "marketplace", "gaming"}
+
+        bad_fb_paths = {"groups", "events", "watch", "share", "marketplace", "gaming"}
         if not first_part or first_part in bad_fb_paths:
             return None
 
-        return m.group(1).rstrip("/")
+        return cleaned
 
     return None
 
@@ -837,30 +847,16 @@ def clean_google_maps_url(u: str) -> Optional[str]:
     if not u:
         return None
 
-    low = u.lower()
-    if not any(x in low for x in [
-        "google.com/maps",
-        "maps.google.",
-        "share.google",
-        "goo.gl/maps",
-        "maps.app.goo.gl",
-    ]):
-        return None
-
     if not looks_like_possible_url(u):
         return None
 
-    try:
-        u = ensure_http(u)
-        resolved = resolve_redirect_url(u)
-        resolved = _strip_tracking_params(resolved)
+    u = ensure_http(u)
+    u = _strip_tracking_params(u)
 
-        if not is_google_maps_like(resolved):
-            return None
-
-        return resolved
-    except Exception:
+    if not is_google_maps_like(u):
         return None
+
+    return u
 
 
 # -----------------------------
@@ -1826,15 +1822,15 @@ def find_profiles_via_search_router(
 
             all_directory_candidates.extend(candidates.get("directory", []))
 
-            best_website = keep_best_candidate(best_website, choose_best_candidate(candidates["website"], 0.50))
-            best_facebook = keep_best_candidate(best_facebook, choose_best_candidate(candidates["facebook"], 0.45))
-            best_instagram = keep_best_candidate(best_instagram, choose_best_candidate(candidates["instagram"], 0.35))
-            best_tiktok = keep_best_candidate(best_tiktok, choose_best_candidate(candidates["tiktok"], 0.45))
-            best_threads = keep_best_candidate(best_threads, choose_best_candidate(candidates["threads"], 0.35))
-            best_x = keep_best_candidate(best_x, choose_best_candidate(candidates["x"], 0.35))
-            best_youtube = keep_best_candidate(best_youtube, choose_best_candidate(candidates["youtube"], 0.35))
-            best_linktree = keep_best_candidate(best_linktree, choose_best_candidate(candidates["linktree"], 0.30))
-            best_uqrto = keep_best_candidate(best_uqrto, choose_best_candidate(candidates["uqrto"], 0.30))
+            best_website = keep_best_candidate(best_website, choose_best_candidate(candidates["website"], 0.42))
+            best_facebook = keep_best_candidate(best_facebook, choose_best_candidate(candidates["facebook"], 0.30))
+            best_instagram = keep_best_candidate(best_instagram, choose_best_candidate(candidates["instagram"], 0.25))
+            best_tiktok = keep_best_candidate(best_tiktok, choose_best_candidate(candidates["tiktok"], 0.30))
+            best_threads = keep_best_candidate(best_threads, choose_best_candidate(candidates["threads"], 0.25))
+            best_x = keep_best_candidate(best_x, choose_best_candidate(candidates["x"], 0.25))
+            best_youtube = keep_best_candidate(best_youtube, choose_best_candidate(candidates["youtube"], 0.25))
+            best_linktree = keep_best_candidate(best_linktree, choose_best_candidate(candidates["linktree"], 0.20))
+            best_uqrto = keep_best_candidate(best_uqrto, choose_best_candidate(candidates["uqrto"], 0.20))
 
         evidence.append(
             f"Provider {provider_name} cumulative best: "
@@ -2060,6 +2056,12 @@ def _find_single_social_via_search_router(
                         cleaned = None
                     if cleaned and looks_like_non_business_instagram(cleaned, title, snippet):
                         cleaned = None
+
+                elif platform == "facebook":
+                    cleaned = clean_social_url(raw_url)
+                    if cleaned and "facebook.com" not in cleaned.lower():
+                        cleaned = None
+
                 elif platform == "tiktok":
                     cleaned = clean_tiktok_url(raw_url)
                     if cleaned and looks_like_non_business_tiktok(cleaned, title, snippet):
@@ -2100,7 +2102,8 @@ def get_internal_candidate_links(base_url: str, html: str, max_links: int = 8) -
     interesting_keywords = [
         "menu", "menù", "carta", "food", "book", "booking", "reserve", "reservation",
         "prenota", "prenotazione", "delivery", "takeaway", "asporto", "ordina",
-        "ordine", "contact", "contatti", "about", "newsletter"
+        "ordine", "contact", "contatti", "about", "newsletter", "event", "evento",
+        "offers", "offerte", "promo", "recensioni", "reviews", "dove-siamo", "location"
     ]
 
     for a in soup.find_all("a", href=True):
@@ -2129,7 +2132,7 @@ def get_internal_candidate_links(base_url: str, html: str, max_links: int = 8) -
     return links
 
 
-def analyze_single_html(html: str) -> Dict[str, bool]:
+def analyze_single_html(html: str) -> Dict[str, Any]:
     soup = BeautifulSoup(html, "lxml")
     text = soup.get_text(" ", strip=True).lower()
     links = [a.get("href", "").lower() for a in soup.find_all("a", href=True)]
@@ -2142,26 +2145,75 @@ def analyze_single_html(html: str) -> Dict[str, bool]:
     def has_any(keywords: List[str]) -> bool:
         return any(k in all_content for k in keywords)
 
+    menu_keywords = ["menu", "menù", "our-menu", "food-menu", "carta", "scarica il menu"]
+    booking_keywords = ["book", "booking", "reserve", "reservation", "prenota", "prenotazione", "thefork", "opentable", "quandoo", "resmio"]
+    delivery_keywords = ["delivery", "takeaway", "asporto", "consegna", "a domicilio", "deliveroo", "ubereats", "justeat", "glovo", "ordina online"]
+    directions_keywords = ["dove siamo", "come raggiungerci", "get directions", "directions", "maps", "mappa", "google maps"]
+    reviews_keywords = ["reviews", "recensioni", "tripadvisor", "google reviews", "cosa dicono", "dicono di noi", "testimonials", "testimonial"]
+    offers_keywords = ["offerta", "offerte", "promo", "promozione", "promotions", "special offer", "discount", "sconto"]
+    events_keywords = ["eventi", "evento", "events", "live music", "serata", "serate", "calendar", "upcoming"]
+    uniqueness_keywords = [
+        "tradizione", "tradizionale", "ingredienti freschi", "ingredienti locali",
+        "chef", "since", "dal", "specialità", "specialita", "signature",
+        "family run", "artigianale", "homemade", "fatto in casa", "territorio",
+        "nostra storia", "about us", "chi siamo", "filosofia", "unique", "experience"
+    ]
+
+    contact_present = (
+        has_any(["contact", "contatti", "tel:", "mailto:", "whatsapp", "dove siamo"])
+        or bool(re.search(r"\+?\d[\d\-\s()]{6,}", text))
+        or bool(re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text))
+    )
+
+    data_capture_present = (
+        len(forms) > 0
+        or has_any(["newsletter", "subscribe", "sign up", "join", "iscriviti", "contact form", "book now", "prenota ora"])
+    )
+
+    menu_present = has_any(menu_keywords) or ".pdf" in all_content
+    menu_quality = "missing"
+    if menu_present:
+        descriptive_menu_signals = [
+            "ingredienti", "ingredients", "allergeni", "allergens", "descrizione",
+            "description", "chef", "specialità", "specialita", "grams", "€"
+        ]
+        if sum(1 for s in descriptive_menu_signals if s in all_content) >= 2:
+            menu_quality = "described"
+        else:
+            menu_quality = "basic_list"
+
+    unique_hits = [k for k in uniqueness_keywords if k in all_content]
+
     return {
-        "menu_present": has_any(["menu", "menù", "our-menu", "food-menu", "carta", "scarica il menu", ".pdf"]),
-        "booking_present": has_any(["book", "booking", "reserve", "reservation", "prenota", "thefork", "opentable", "quandoo", "resmio"]),
-        "delivery_present": has_any(["delivery", "takeaway", "asporto", "consegna", "a domicilio", "deliveroo", "ubereats", "justeat", "glovo", "ordina online"]),
-        "data_capture_present": (len(forms) > 0 or has_any(["newsletter", "subscribe", "sign up", "join", "iscriviti", "contact form"])),
-        "contact_present": (
-            has_any(["contact", "contatti", "tel:", "mailto:", "whatsapp", "dove siamo"])
-            or bool(re.search(r"\+?\d[\d\-\s()]{6,}", text))
-            or bool(re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text))
-        ),
+        "menu_present": menu_present,
+        "menu_quality": menu_quality,
+        "booking_present": has_any(booking_keywords),
+        "delivery_present": has_any(delivery_keywords),
+        "data_capture_present": data_capture_present,
+        "contact_present": contact_present,
+        "directions_present": has_any(directions_keywords),
+        "reviews_visible": has_any(reviews_keywords),
+        "offers_promos_present": has_any(offers_keywords),
+        "events_present": has_any(events_keywords),
+        "unique_value_present": len(unique_hits) >= 2,
+        "unique_value_examples": unique_hits[:8],
     }
 
 
-def analyze_website_features(website_url: str) -> Dict[str, bool]:
+def analyze_website_features(website_url: str) -> Dict[str, Any]:
     result = {
         "menu_present": False,
+        "menu_quality": "missing",
         "booking_present": False,
         "delivery_present": False,
         "data_capture_present": False,
         "contact_present": False,
+        "directions_present": False,
+        "reviews_visible": False,
+        "offers_promos_present": False,
+        "events_present": False,
+        "unique_value_present": False,
+        "unique_value_examples": [],
     }
 
     homepage_html = fetch_url(website_url)
@@ -2169,10 +2221,21 @@ def analyze_website_features(website_url: str) -> Dict[str, bool]:
         return result
 
     homepage_result = analyze_single_html(homepage_html)
-    for k, v in homepage_result.items():
-        result[k] = result[k] or v
 
-    candidate_links = get_internal_candidate_links(website_url, homepage_html, max_links=8)
+    for k in [
+        "booking_present", "delivery_present", "data_capture_present", "contact_present",
+        "directions_present", "reviews_visible", "offers_promos_present", "events_present",
+        "unique_value_present"
+    ]:
+        result[k] = result[k] or homepage_result[k]
+
+    if homepage_result["menu_present"]:
+        result["menu_present"] = True
+        result["menu_quality"] = homepage_result["menu_quality"]
+
+    result["unique_value_examples"] = list(homepage_result.get("unique_value_examples", []))
+
+    candidate_links = get_internal_candidate_links(website_url, homepage_html, max_links=10)
     visited: Set[str] = set()
 
     for link in candidate_links:
@@ -2186,10 +2249,114 @@ def analyze_website_features(website_url: str) -> Dict[str, bool]:
             continue
 
         sub_result = analyze_single_html(html)
-        for k, v in sub_result.items():
-            result[k] = result[k] or v
+
+        for k in [
+            "booking_present", "delivery_present", "data_capture_present", "contact_present",
+            "directions_present", "reviews_visible", "offers_promos_present", "events_present",
+            "unique_value_present"
+        ]:
+            result[k] = result[k] or sub_result[k]
+
+        if sub_result["menu_present"]:
+            result["menu_present"] = True
+            if result["menu_quality"] != "described":
+                result["menu_quality"] = sub_result["menu_quality"]
+
+        for item in sub_result.get("unique_value_examples", []):
+            if item not in result["unique_value_examples"]:
+                result["unique_value_examples"].append(item)
 
     return result
+
+
+def classify_website_type(features: Dict[str, Any]) -> Tuple[str, float]:
+    score = 0.0
+
+    if features.get("menu_present"):
+        score += 1.0
+    if features.get("booking_present"):
+        score += 1.0
+    if features.get("delivery_present"):
+        score += 1.0
+    if features.get("data_capture_present"):
+        score += 1.0
+    if features.get("contact_present"):
+        score += 1.0
+    if features.get("directions_present"):
+        score += 0.5
+    if features.get("reviews_visible"):
+        score += 0.5
+    if features.get("offers_promos_present"):
+        score += 0.5
+    if features.get("events_present"):
+        score += 0.5
+    if features.get("unique_value_present"):
+        score += 1.0
+    if features.get("menu_quality") == "described":
+        score += 1.0
+
+    completeness_score = round(min(score / 8.0, 1.0), 3)
+
+    if completeness_score >= 0.75:
+        return "complete", completeness_score
+    elif completeness_score >= 0.40:
+        return "showcase_plus", completeness_score
+    return "basic_showcase", completeness_score
+
+
+def build_website_strengths_weaknesses(features: Dict[str, Any], creator: str = "") -> Tuple[List[str], List[str]]:
+    strengths = []
+    weaknesses = []
+
+    if features.get("menu_present"):
+        if features.get("menu_quality") == "described":
+            strengths.append("Menu is present and described")
+        else:
+            strengths.append("Menu is present")
+    else:
+        weaknesses.append("No menu found")
+
+    if features.get("booking_present"):
+        strengths.append("Online booking available")
+    else:
+        weaknesses.append("No online booking found")
+
+    if features.get("delivery_present"):
+        strengths.append("Delivery or takeaway visible")
+    else:
+        weaknesses.append("No delivery signal found")
+
+    if features.get("data_capture_present"):
+        strengths.append("Customer data capture is present")
+    else:
+        weaknesses.append("No customer data capture found")
+
+    if features.get("contact_present"):
+        strengths.append("Contact information is visible")
+    else:
+        weaknesses.append("Contact information is weak or missing")
+
+    if features.get("directions_present"):
+        strengths.append("Directions/location info is visible")
+
+    if features.get("reviews_visible"):
+        strengths.append("Reviews/testimonials are visible")
+
+    if features.get("offers_promos_present"):
+        strengths.append("Offers or promotions are visible")
+
+    if features.get("events_present"):
+        strengths.append("Events or special activities are visible")
+
+    if features.get("unique_value_present"):
+        strengths.append("Website communicates unique identity")
+    else:
+        weaknesses.append("Unique restaurant identity is not clearly explained")
+
+    if creator:
+        strengths.append(f"Website creator/platform identified: {creator}")
+
+    return strengths[:8], weaknesses[:8]
 
 
 # -----------------------------
@@ -2406,6 +2573,8 @@ def validate_restaurant_match(
                 positive_signals += 1
             if restaurant_kw:
                 positive_signals += 1
+            if name_in_page and restaurant_kw and not conflict:
+                positive_signals += 1
 
             if not name_in_page:
                 reasons.append("Website does not clearly mention the restaurant name")
@@ -2465,76 +2634,62 @@ def assign_social_from_candidate(
     setattr(res, score_field, candidate.score)
     setattr(res, reason_field, candidate.reason)
     setattr(res, found_from_field, candidate.source)
+    
+    
+    
+    
+    
+def find_facebook_via_search_router(name: str, city: str, country: str):
+    return _find_single_social_via_search_router(name, city, country, "facebook", 0.30)
 
 
 def enrich_from_website_html(res: ResolveResult, html: str, source_label: str, evidence: List[str]) -> None:
     links_data = extract_links_from_html(html)
 
-    if not res.instagram and links_data.get("instagram"):
-        res.instagram = links_data["instagram"]
-        res.instagram_score = max(res.instagram_score, 0.90)
-        res.instagram_match_reason = f"Found directly in {source_label} HTML"
-        res.instagram_found_from = source_label
-        evidence.append(f"Instagram extracted from {source_label}")
+    def assign_if_better(
+        field: str,
+        score_field: str,
+        reason_field: str,
+        found_from_field: str,
+        value: Optional[str],
+        label: str,
+        min_replace_score: float = 0.85,
+    ):
+        if not value:
+            return
 
-    if not res.facebook and links_data.get("facebook"):
-        res.facebook = links_data["facebook"]
-        res.facebook_score = max(res.facebook_score, 0.90)
-        res.facebook_match_reason = f"Found directly in {source_label} HTML"
-        res.facebook_found_from = source_label
-        evidence.append(f"Facebook extracted from {source_label}")
+        current_value = getattr(res, field, None)
+        current_score = getattr(res, score_field, 0.0) or 0.0
 
-    if not res.tiktok and links_data.get("tiktok"):
-        res.tiktok = links_data["tiktok"]
-        res.tiktok_score = max(res.tiktok_score, 0.90)
-        res.tiktok_match_reason = f"Found directly in {source_label} HTML"
-        res.tiktok_found_from = source_label
+        if (not current_value) or (current_score < min_replace_score):
+            setattr(res, field, value)
+            setattr(res, score_field, max(current_score, 0.90))
+            setattr(res, reason_field, f"Found directly in {source_label} HTML")
+            setattr(res, found_from_field, source_label)
+            evidence.append(f"{label} extracted from {source_label}")
+
+    assign_if_better("instagram", "instagram_score", "instagram_match_reason", "instagram_found_from", links_data.get("instagram"), "Instagram")
+    assign_if_better("facebook", "facebook_score", "facebook_match_reason", "facebook_found_from", links_data.get("facebook"), "Facebook")
+    assign_if_better("tiktok", "tiktok_score", "tiktok_match_reason", "tiktok_found_from", links_data.get("tiktok"), "TikTok")
+    assign_if_better("threads", "threads_score", "threads_match_reason", "threads_found_from", links_data.get("threads"), "Threads")
+    assign_if_better("x", "x_score", "x_match_reason", "x_found_from", links_data.get("x"), "X")
+    assign_if_better("youtube", "youtube_score", "youtube_match_reason", "youtube_found_from", links_data.get("youtube"), "YouTube")
+    assign_if_better("linktree", "linktree_score", "linktree_match_reason", "linktree_found_from", links_data.get("linktree"), "Linktree")
+    assign_if_better("uqrto", "uqrto_score", "uqrto_match_reason", "uqrto_found_from", links_data.get("uqrto"), "uqr.to")
+
+    if res.tiktok:
         res.tiktok_present = True
-        evidence.append(f"TikTok extracted from {source_label}")
 
-    if not res.threads and links_data.get("threads"):
-        res.threads = links_data["threads"]
-        res.threads_score = max(res.threads_score, 0.90)
-        res.threads_match_reason = f"Found directly in {source_label} HTML"
-        res.threads_found_from = source_label
-        evidence.append(f"Threads extracted from {source_label}")
-
-    if not res.x and links_data.get("x"):
-        res.x = links_data["x"]
-        res.x_score = max(res.x_score, 0.90)
-        res.x_match_reason = f"Found directly in {source_label} HTML"
-        res.x_found_from = source_label
-        evidence.append(f"X extracted from {source_label}")
-
-    if not res.youtube and links_data.get("youtube"):
-        res.youtube = links_data["youtube"]
-        res.youtube_score = max(res.youtube_score, 0.90)
-        res.youtube_match_reason = f"Found directly in {source_label} HTML"
-        res.youtube_found_from = source_label
-        evidence.append(f"YouTube extracted from {source_label}")
-
-    if not res.linktree and links_data.get("linktree"):
-        res.linktree = links_data["linktree"]
-        res.linktree_score = max(res.linktree_score, 0.90)
-        res.linktree_match_reason = f"Found directly in {source_label} HTML"
-        res.linktree_found_from = source_label
-        evidence.append(f"Linktree extracted from {source_label}")
-
-    if not res.uqrto and links_data.get("uqrto"):
-        res.uqrto = links_data["uqrto"]
-        res.uqrto_score = max(res.uqrto_score, 0.90)
-        res.uqrto_match_reason = f"Found directly in {source_label} HTML"
-        res.uqrto_found_from = source_label
-        evidence.append(f"uqr.to extracted from {source_label}")
-
-    if not res.google_maps_url and links_data.get("google_maps"):
-        res.google_maps_url = links_data["google_maps"]
-        evidence.append(f"Google Maps extracted from {source_label}")
+    if links_data.get("google_maps"):
+        if not res.google_maps_url:
+            res.google_maps_url = links_data["google_maps"]
+            evidence.append(f"Google Maps extracted from {source_label}")
 
     res.directory_links_json = append_unique_json_list(
         res.directory_links_json,
         links_data.get("directory_links", []),
     )
+
     res.official_website_candidates_json = append_unique_json_list(
         res.official_website_candidates_json,
         links_data.get("official_website_candidates", []),
@@ -2546,15 +2701,22 @@ def apply_platform_flags(res: ResolveResult) -> None:
 
     if not res.google_maps_url:
         res.google_maps_url = platforms.get("google_maps")
-
-    res.justeat_url = platforms.get("justeat")
-    res.deliveroo_url = platforms.get("deliveroo")
-    res.thefork_url = platforms.get("thefork")
-    res.tripadvisor_url = platforms.get("tripadvisor")
-    res.glovo_url = platforms.get("glovo")
-    res.restaurantguru_url = platforms.get("restaurantguru")
-    res.opentable_url = platforms.get("opentable")
-    res.quandoo_url = platforms.get("quandoo")
+    if not res.justeat_url:
+        res.justeat_url = platforms.get("justeat")
+    if not res.deliveroo_url:
+        res.deliveroo_url = platforms.get("deliveroo")
+    if not res.thefork_url:
+        res.thefork_url = platforms.get("thefork")
+    if not res.tripadvisor_url:
+        res.tripadvisor_url = platforms.get("tripadvisor")
+    if not res.glovo_url:
+        res.glovo_url = platforms.get("glovo")
+    if not res.restaurantguru_url:
+        res.restaurantguru_url = platforms.get("restaurantguru")
+    if not res.opentable_url:
+        res.opentable_url = platforms.get("opentable")
+    if not res.quandoo_url:
+        res.quandoo_url = platforms.get("quandoo")
 
     res.has_google_maps = bool(res.google_maps_url)
     res.has_justeat = bool(res.justeat_url)
@@ -2707,6 +2869,19 @@ def apply_website_creator_detection(res: ResolveResult, html: str, evidence: Lis
         )
 
 
+def enrich_from_valid_website(res: ResolveResult, evidence: List[str], source_label: str) -> None:
+    if not res.website or not res.website_validated:
+        return
+
+    html = fetch_url(res.website)
+    time.sleep(SLEEP_BETWEEN_REQUESTS_SEC)
+    if not html:
+        return
+
+    enrich_from_website_html(res, html, source_label, evidence)
+    apply_website_creator_detection(res, html, evidence)
+
+
 def try_upgrade_website_from_candidates(res: ResolveResult, name: str, city: str, evidence: List[str]) -> None:
     if res.website and res.website_validated and res.website_validation_score >= 0.70:
         return
@@ -2807,14 +2982,10 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
         evidence.append(f"OSM error: {osm['error']}" if osm.get("error") else "OSM no matches")
 
     if res.website and res.website_validated:
-        html = fetch_url(res.website)
-        time.sleep(SLEEP_BETWEEN_REQUESTS_SEC)
-        if html:
-            enrich_from_website_html(res, html, "website_html", evidence)
-            apply_website_creator_detection(res, html, evidence)
-            if res.source == "osm":
-                res.source = "osm+site"
-                res.confidence = min(1.0, res.confidence + 0.10)
+        enrich_from_valid_website(res, evidence, "website_html")
+        if res.source == "osm":
+            res.source = "osm+site"
+            res.confidence = min(1.0, res.confidence + 0.10)
 
     if not res.website:
         guessed_website, ev = find_working_domain(primary_search_name, city, country)
@@ -2831,11 +3002,7 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
             apply_website_validation(res, name, city, evidence)
 
             if res.website and res.website_validated:
-                html = fetch_url(res.website)
-                time.sleep(SLEEP_BETWEEN_REQUESTS_SEC)
-                if html:
-                    enrich_from_website_html(res, html, "guessed_website_html", evidence)
-                    apply_website_creator_detection(res, html, evidence)
+                enrich_from_valid_website(res, evidence, "guessed_website_html")
 
     if (not res.website) or (not res.instagram) or (not res.facebook) or (not res.tiktok):
         profiles, ev, providers_tried = find_profiles_via_search_router(primary_search_name, city, country)
@@ -2870,6 +3037,7 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
                     res.source = website_candidate.source
                 res.confidence = max(res.confidence, 0.72)
                 evidence.append(f"Accepted router website: {candidate_website} (score={website_candidate.score:.3f})")
+                enrich_from_valid_website(res, evidence, "router_website_html")
             else:
                 res.official_website_candidates_json = append_unique_json_list(
                     res.official_website_candidates_json,
@@ -2898,13 +3066,6 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
 
         if any([profiles.get("instagram"), profiles.get("facebook"), profiles.get("tiktok")]):
             res.confidence = max(res.confidence, 0.72)
-
-        if res.website and res.website_validated and res.website_score >= 0.75:
-            html = fetch_url(res.website)
-            time.sleep(SLEEP_BETWEEN_REQUESTS_SEC)
-            if html:
-                enrich_from_website_html(res, html, "router_website_html", evidence)
-                apply_website_creator_detection(res, html, evidence)
 
     if not res.instagram:
         instagram_candidate, ev, providers_tried = find_instagram_via_search_router(primary_search_name, city, country)
@@ -2940,6 +3101,21 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
         if ig_primary_link and is_valid_external_link(ig_primary_link):
             res.instagram_primary_external_link = ig_primary_link
             evidence.append(f"Instagram primary external link found: {ig_primary_link}")
+            
+            
+        if not res.facebook:
+            facebook_candidate, ev, providers_tried = find_facebook_via_search_router(primary_search_name, city, country)
+        evidence += ev
+        evidence.append(f"Providers tried for Facebook search: {providers_tried}")
+
+        if facebook_candidate:
+            assign_social_from_candidate(
+                res, "facebook", "facebook_score", "facebook_match_reason", "facebook_found_from", facebook_candidate
+            )
+            evidence.append(f"Facebook profile found via dedicated Facebook search (score={facebook_candidate.score:.3f})")
+            if res.source == "none":
+                res.source = facebook_candidate.source
+            res.confidence = max(res.confidence, 0.68)
 
     if res.facebook:
         fb_links = analyze_facebook_external_links(res.facebook)
@@ -3003,11 +3179,7 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
                     res.source = website_candidate.source
                 res.confidence = max(res.confidence, 0.74)
 
-                html = fetch_url(res.website)
-                time.sleep(SLEEP_BETWEEN_REQUESTS_SEC)
-                if html:
-                    enrich_from_website_html(res, html, "dedicated_website_html", evidence)
-                    apply_website_creator_detection(res, html, evidence)
+                enrich_from_valid_website(res, evidence, "dedicated_website_html")
 
     if res.uqrto:
         resolved_uqrto = resolve_redirect_url(res.uqrto)
@@ -3041,18 +3213,42 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
 
     if res.website and res.website_validated:
         features = analyze_website_features(res.website)
+
         res.menu_present = features["menu_present"]
+        res.menu_quality = features["menu_quality"]
         res.booking_present = features["booking_present"]
         res.delivery_present = features["delivery_present"]
         res.data_capture_present = features["data_capture_present"]
         res.contact_present = features["contact_present"]
+        res.directions_present = features["directions_present"]
+        res.reviews_visible = features["reviews_visible"]
+        res.offers_promos_present = features["offers_promos_present"]
+        res.events_present = features["events_present"]
+        res.unique_value_present = features["unique_value_present"]
+        res.unique_value_examples_json = json.dumps(features.get("unique_value_examples", []), ensure_ascii=False)
+
+        res.website_type, res.website_completeness_score = classify_website_type(features)
+
+        creator_label = res.website_creator or res.website_platform or ""
+        strengths, weaknesses = build_website_strengths_weaknesses(features, creator_label)
+        res.website_strengths_json = json.dumps(strengths, ensure_ascii=False)
+        res.website_weaknesses_json = json.dumps(weaknesses, ensure_ascii=False)
+
         evidence.append(
             "Website features analyzed: "
             f"menu={res.menu_present}, "
+            f"menu_quality={res.menu_quality}, "
             f"booking={res.booking_present}, "
             f"delivery={res.delivery_present}, "
             f"data_capture={res.data_capture_present}, "
-            f"contact={res.contact_present}"
+            f"contact={res.contact_present}, "
+            f"directions={res.directions_present}, "
+            f"reviews={res.reviews_visible}, "
+            f"offers={res.offers_promos_present}, "
+            f"events={res.events_present}, "
+            f"unique_value={res.unique_value_present}, "
+            f"website_type={res.website_type}, "
+            f"website_completeness_score={res.website_completeness_score}"
         )
 
     res.is_restaurant_match, res.non_restaurant_reason = validate_restaurant_match(
@@ -3094,7 +3290,10 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
     if real_links_found == 0:
         res.confidence = min(res.confidence, 0.25)
     elif real_links_found == 1:
-        res.confidence = min(res.confidence, 0.55)
+        if res.website and res.website_validated and res.website_validation_score >= 0.80:
+            res.confidence = min(res.confidence, 0.75)
+        else:
+            res.confidence = min(res.confidence, 0.55)
     elif real_links_found == 2:
         res.confidence = min(res.confidence, 0.80)
     elif real_links_found == 3:
@@ -3118,7 +3317,8 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
     apply_platform_flags(res)
 
     res.needs_review = (
-        (res.confidence < 0.65)
+        res.needs_review
+        or (res.confidence < 0.65)
         or (not res.website and not res.instagram and not res.facebook and not res.tiktok)
     )
 

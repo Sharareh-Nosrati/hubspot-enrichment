@@ -466,14 +466,20 @@ class SearchRouter:
     def _is_good_enough(self, resp: SearchResponse) -> bool:
         if not resp.ok:
             return False
-        if len(resp.results) < self.config.policy.min_results:
+        if not resp.results:
             return False
+
         top = max((r.score for r in resp.results), default=0.0)
-        return top >= self.config.policy.min_top_score
+        strong_results = sum(1 for r in resp.results if r.score >= 0.35)
+
+        return top >= self.config.policy.min_top_score and strong_results >= 1
 
     def search(self, query: str, **kwargs: Any) -> SearchResponse:
         debug_log: List[Dict[str, Any]] = []
         providers_order = kwargs.get("providers_order", self.config.providers_order)
+
+        best_partial_resp: Optional[SearchResponse] = None
+        best_partial_score = -1.0
 
         for provider_name in providers_order:
             provider = self.providers.get(provider_name)
@@ -501,18 +507,27 @@ class SearchRouter:
                 return cached
 
             resp = provider.search(query, **search_kwargs)
+
+            if resp.ok and self.config.dedupe:
+                resp.results = dedupe_results(resp.results)
+
+            top_score = max((r.score for r in resp.results), default=0.0)
+
             debug_log.append(
                 {
                     "provider": provider_name,
                     "ok": resp.ok,
                     "results": len(resp.results),
+                    "top_score": top_score,
                     "latency_ms": resp.latency_ms,
                     "error": resp.error_message,
                 }
             )
 
-            if resp.ok and self.config.dedupe:
-                resp.results = dedupe_results(resp.results)
+            if resp.ok and resp.results:
+                if top_score > best_partial_score:
+                    best_partial_score = top_score
+                    best_partial_resp = resp
 
             if self._is_good_enough(resp):
                 resp.meta["debug"] = debug_log
@@ -522,15 +537,19 @@ class SearchRouter:
             if not resp.ok:
                 self._mark_provider_failed(provider_name)
 
+        if best_partial_resp is not None:
+            best_partial_resp.meta["debug"] = debug_log
+            best_partial_resp.meta["partial_fallback"] = True
+            return best_partial_resp
+
         return SearchResponse(
             provider="router",
             query=query,
             ok=False,
             error_type="all_providers_failed",
-            error_message="No provider returned a good enough result",
+            error_message="No provider returned any usable result",
             meta={"debug": debug_log},
         )
-
 
 # ============================================================
 # Factory
