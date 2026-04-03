@@ -208,12 +208,6 @@ def bool_to_yes_no(value: Any) -> str:
     return "Yes" if to_bool(value) else "No"
 
 
-def yes_no_or_blank(value: Any) -> str:
-    if value in ("", None):
-        return ""
-    return "Yes" if to_bool(value) else "No"
-
-
 def pct_from_score(value: Any) -> str:
     if value in ("", None):
         return ""
@@ -634,109 +628,43 @@ def build_note_body(result, record_id: str, name: str, city: str, country: str) 
     restaurant_match_txt = bool_to_yes_no(getattr(result, "is_restaurant_match", False))
     generated_at = datetime.now(timezone.utc).isoformat()
 
-    rows = [
-        (
-            "Website",
-            getattr(result, "website", ""),
-            pct(getattr(result, "website_score", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "website_found_from", "") or getattr(result, "source", "")
-        ),
-        (
-            "Instagram",
-            getattr(result, "instagram", ""),
-            pct(getattr(result, "instagram_score", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "instagram_found_from", "")
-        ),
-        (
-            "Facebook",
-            getattr(result, "facebook", ""),
-            pct(getattr(result, "facebook_score", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "facebook_found_from", "")
-        ),
-        (
-            "X",
-            getattr(result, "x", ""),
-            pct(getattr(result, "x_score", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "x_found_from", "")
-        ),
-        (
-            "TikTok",
-            getattr(result, "tiktok", ""),
-            pct(getattr(result, "tiktok_score", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "tiktok_found_from", "")
-        ),
-        (
-            "Google Maps",
-            getattr(result, "google_maps_url", ""),
-            pct(getattr(result, "confidence", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "source", "")
-        ),
-        (
-            "TheFork",
-            getattr(result, "thefork_url", ""),
-            pct(getattr(result, "confidence", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "source", "")
-        ),
-        (
-            "Tripadvisor",
-            getattr(result, "tripadvisor_url", ""),
-            pct(getattr(result, "confidence", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "source", "")
-        ),
+    link_rows = [
+        ("Website", getattr(result, "website", ""), pct(getattr(result, "website_score", "")), getattr(result, "website_found_from", "") or getattr(result, "source", "")),
+        ("Instagram", getattr(result, "instagram", ""), pct(getattr(result, "instagram_score", "")), getattr(result, "instagram_found_from", "")),
+        ("Facebook", getattr(result, "facebook", ""), pct(getattr(result, "facebook_score", "")), getattr(result, "facebook_found_from", "")),
+        ("TikTok", getattr(result, "tiktok", ""), pct(getattr(result, "tiktok_score", "")), getattr(result, "tiktok_found_from", "")),
+        ("Threads", getattr(result, "threads", ""), pct(getattr(result, "threads_score", "")), getattr(result, "threads_found_from", "")),
+        ("X", getattr(result, "x", ""), pct(getattr(result, "x_score", "")), getattr(result, "x_found_from", "")),
+        ("YouTube", getattr(result, "youtube", ""), pct(getattr(result, "youtube_score", "")), getattr(result, "youtube_found_from", "")),
+        ("Linktree", getattr(result, "linktree", ""), pct(getattr(result, "linktree_score", "")), getattr(result, "linktree_found_from", "")),
+        ("uqr.to", getattr(result, "uqrto", ""), pct(getattr(result, "uqrto_score", "")), getattr(result, "uqrto_found_from", "")),
+        ("Google Maps", getattr(result, "google_maps_url", ""), pct(getattr(result, "confidence", "")), getattr(result, "source", "")),
+        ("TheFork", getattr(result, "thefork_url", ""), pct(getattr(result, "confidence", "")), getattr(result, "source", "")),
+        ("Tripadvisor", getattr(result, "tripadvisor_url", ""), pct(getattr(result, "confidence", "")), getattr(result, "source", "")),
+        ("JustEat", getattr(result, "justeat_url", ""), pct(getattr(result, "confidence", "")), getattr(result, "source", "")),
+        ("Deliveroo", getattr(result, "deliveroo_url", ""), pct(getattr(result, "confidence", "")), getattr(result, "source", "")),
+        ("Glovo", getattr(result, "glovo_url", ""), pct(getattr(result, "confidence", "")), getattr(result, "source", "")),
+        ("Restaurant Guru", getattr(result, "restaurantguru_url", ""), pct(getattr(result, "confidence", "")), getattr(result, "source", "")),
+        ("OpenTable", getattr(result, "opentable_url", ""), pct(getattr(result, "confidence", "")), getattr(result, "source", "")),
+        ("Quandoo", getattr(result, "quandoo_url", ""), pct(getattr(result, "confidence", "")), getattr(result, "source", "")),
     ]
 
     links_html = ""
-    for label, link, score, review, match, source in rows:
+    for label, link, score, source in link_rows:
         links_html += (
             f"<b>{safe_text(label)}</b>: {html_link(link, 'Open link') if link else 'Not found'}"
             f" | score confidence: {safe_text(score or '-')}"
-            f" | Needs review: {safe_text(review)}"
-            f" | restaurant Match: {safe_text(match)}"
+            f" | Needs review: {safe_text(needs_review_txt)}"
+            f" | restaurant Match: {safe_text(restaurant_match_txt)}"
             f" | source: {safe_text(source or '-')}"
             f"<br>"
         )
 
-    extra_links = []
-    for label, key in [
-        ("Threads", "threads"),
-        ("YouTube", "youtube"),
-        ("Linktree", "linktree"),
-        ("uqr.to", "uqrto"),
-        ("JustEat", "justeat_url"),
-        ("Deliveroo", "deliveroo_url"),
-        ("Glovo", "glovo_url"),
-        ("Restaurant Guru", "restaurantguru_url"),
-        ("OpenTable", "opentable_url"),
-        ("Quandoo", "quandoo_url"),
-    ]:
-        value = getattr(result, key, "")
-        if value:
-            extra_links.append(f"{safe_text(label)}: {html_link(value, 'Open link')}")
-
-    other_extra_links = "<br>".join(extra_links) if extra_links else "Not found"
-
-    website_strengths = []
-    website_weaknesses = []
     try:
         website_strengths = json.loads(getattr(result, "website_strengths_json", "[]") or "[]")
     except Exception:
         website_strengths = []
+
     try:
         website_weaknesses = json.loads(getattr(result, "website_weaknesses_json", "[]") or "[]")
     except Exception:
@@ -749,11 +677,12 @@ def build_note_body(result, record_id: str, name: str, city: str, country: str) 
         f"<b>City:</b> {safe_text(city)}<br>"
         f"<b>Country:</b> {safe_text(country)}<br><br>"
 
-        f"<b>Digital links:</b><br>"
+        f"<b>Digital presence links:</b><br>"
         f"{links_html}<br>"
 
         f"<b>Website analysis:</b><br>"
         f"Website type: {safe_text(getattr(result, 'website_type', '') or 'Unknown')}<br>"
+        f"Website validated: {bool_to_yes_no(getattr(result, 'website_validated', False))}<br>"
         f"Website completeness score: {pct(getattr(result, 'website_completeness_score', '')) or '-'}<br>"
         f"Menu: {bool_to_yes_no(getattr(result, 'menu_present', False))}<br>"
         f"Menu quality: {safe_text(getattr(result, 'menu_quality', '') or '-')}<br>"
@@ -767,14 +696,19 @@ def build_note_body(result, record_id: str, name: str, city: str, country: str) 
         f"Events: {bool_to_yes_no(getattr(result, 'events_present', False))}<br>"
         f"Unique identity explained: {bool_to_yes_no(getattr(result, 'unique_value_present', False))}<br>"
         f"Website creator: {safe_text(getattr(result, 'website_creator', '') or '-')}<br>"
+        f"Website creator type: {safe_text(getattr(result, 'website_creator_type', '') or '-')}<br>"
+        f"Website creator confidence: {safe_text(getattr(result, 'website_creator_confidence', '') or '-')}<br>"
+        f"Website creator source: {safe_text(getattr(result, 'website_creator_source', '') or '-')}<br>"
         f"Website platform: {safe_text(getattr(result, 'website_platform', '') or '-')}<br>"
         f"Website strengths: {safe_text(' | '.join(website_strengths) if website_strengths else '-')}<br>"
         f"Website weaknesses: {safe_text(' | '.join(website_weaknesses) if website_weaknesses else '-')}<br><br>"
 
         f"<b>Extra data</b><br>"
+        f"Status: {safe_text(compute_status(result))}<br>"
+        f"Restaurant match: {safe_text(restaurant_match_txt)}<br>"
+        f"Needs review: {safe_text(needs_review_txt)}<br>"
         f"non_restaurant reason: {safe_text(getattr(result, 'non_restaurant_reason', '') or '')}<br>"
-        f"Generated at: {safe_text(generated_at)}<br>"
-        f"other extra links: {other_extra_links}"
+        f"Generated at: {safe_text(generated_at)}"
     )
 
 
@@ -786,16 +720,6 @@ def pdf_full_width(pdf: FPDF) -> float:
     return pdf.w - pdf.l_margin - pdf.r_margin
 
 
-def pdf_title(pdf: FPDF, text: str) -> None:
-    pdf.set_font("helvetica", "B", 14)
-    pdf.cell(pdf_full_width(pdf), 10, safe_text(text), border=1, ln=1, align="C")
-
-
-def pdf_section_title(pdf: FPDF, text: str) -> None:
-    pdf.set_font("helvetica", "B", 12)
-    pdf.cell(pdf_full_width(pdf), 9, safe_text(text), border=1, ln=1, align="C")
-
-
 def pdf_two_col_row(pdf: FPDF, left: str, right: str, left_w: float = 70) -> None:
     total_w = pdf_full_width(pdf)
     right_w = total_w - left_w
@@ -803,6 +727,7 @@ def pdf_two_col_row(pdf: FPDF, left: str, right: str, left_w: float = 70) -> Non
     x = pdf.get_x()
 
     pdf.set_font("helvetica", "", 10)
+
     left_lines = max(1, len(safe_text(left)) // 30 + 1)
     right_lines = max(1, len(safe_text(right)) // 55 + 1)
     row_h = max(8, max(left_lines, right_lines) * 5)
@@ -844,9 +769,6 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
     pdf.set_margins(left=8, top=8, right=8)
     pdf.add_page()
 
-    def s(v):
-        return safe_text(v if v is not None else "")
-
     def yn(v):
         return "Yes" if to_bool(v) else "No"
 
@@ -858,11 +780,11 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
 
     page_w = pdf.w - pdf.l_margin - pdf.r_margin
 
-    col1 = 48
-    col2 = 62
-    col3 = 35
-    col4 = 30
-    col5 = 36
+    col1 = 36
+    col2 = 88
+    col3 = 28
+    col4 = 28
+    col5 = 28
     col6 = page_w - (col1 + col2 + col3 + col4 + col5)
 
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -879,7 +801,7 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
     pdf_table_row(
         pdf,
         [col1, col2, col3, col4, col5, col6],
-        ["Digital links", "Link", "Score confidence", "Needs review", "Restaurant match", "Source"],
+        ["Digital presence", "Link", "Score", "Needs review", "Match", "Source"],
         bold=True
     )
 
@@ -887,70 +809,24 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
     restaurant_match_txt = yn(getattr(result, "is_restaurant_match", False))
 
     rows = [
-        [
-            "Website",
-            getattr(result, "website", "") or "",
-            pct(getattr(result, "website_score", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "website_found_from", "") or getattr(result, "source", "")
-        ],
-        [
-            "Instagram",
-            getattr(result, "instagram", "") or "",
-            pct(getattr(result, "instagram_score", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "instagram_found_from", "")
-        ],
-        [
-            "Facebook",
-            getattr(result, "facebook", "") or "",
-            pct(getattr(result, "facebook_score", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "facebook_found_from", "")
-        ],
-        [
-            "X",
-            getattr(result, "x", "") or "",
-            pct(getattr(result, "x_score", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "x_found_from", "")
-        ],
-        [
-            "TikTok",
-            getattr(result, "tiktok", "") or "",
-            pct(getattr(result, "tiktok_score", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "tiktok_found_from", "")
-        ],
-        [
-            "Google Maps",
-            getattr(result, "google_maps_url", "") or "",
-            pct(getattr(result, "confidence", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "source", "")
-        ],
-        [
-            "TheFork",
-            getattr(result, "thefork_url", "") or "",
-            pct(getattr(result, "confidence", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "source", "")
-        ],
-        [
-            "Tripadvisor",
-            getattr(result, "tripadvisor_url", "") or "",
-            pct(getattr(result, "confidence", "")),
-            needs_review_txt,
-            restaurant_match_txt,
-            getattr(result, "source", "")
-        ],
+        ["Website", getattr(result, "website", "") or "", pct(getattr(result, "website_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "website_found_from", "") or getattr(result, "source", "")],
+        ["Instagram", getattr(result, "instagram", "") or "", pct(getattr(result, "instagram_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "instagram_found_from", "")],
+        ["Facebook", getattr(result, "facebook", "") or "", pct(getattr(result, "facebook_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "facebook_found_from", "")],
+        ["TikTok", getattr(result, "tiktok", "") or "", pct(getattr(result, "tiktok_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "tiktok_found_from", "")],
+        ["Threads", getattr(result, "threads", "") or "", pct(getattr(result, "threads_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "threads_found_from", "")],
+        ["X", getattr(result, "x", "") or "", pct(getattr(result, "x_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "x_found_from", "")],
+        ["YouTube", getattr(result, "youtube", "") or "", pct(getattr(result, "youtube_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "youtube_found_from", "")],
+        ["Linktree", getattr(result, "linktree", "") or "", pct(getattr(result, "linktree_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "linktree_found_from", "")],
+        ["uqr.to", getattr(result, "uqrto", "") or "", pct(getattr(result, "uqrto_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "uqrto_found_from", "")],
+        ["Google Maps", getattr(result, "google_maps_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
+        ["TheFork", getattr(result, "thefork_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
+        ["Tripadvisor", getattr(result, "tripadvisor_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
+        ["JustEat", getattr(result, "justeat_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
+        ["Deliveroo", getattr(result, "deliveroo_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
+        ["Glovo", getattr(result, "glovo_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
+        ["Restaurant Guru", getattr(result, "restaurantguru_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
+        ["OpenTable", getattr(result, "opentable_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
+        ["Quandoo", getattr(result, "quandoo_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
     ]
 
     for row in rows:
@@ -961,6 +837,7 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
     pdf.ln(8)
 
     pdf_two_col_row(pdf, "Website type", getattr(result, "website_type", "") or "", left_w=55)
+    pdf_two_col_row(pdf, "Website validated", yn(getattr(result, "website_validated", False)), left_w=55)
     pdf_two_col_row(pdf, "Website completeness score", pct(getattr(result, "website_completeness_score", "")) or "", left_w=55)
     pdf_two_col_row(pdf, "Menu", yn(getattr(result, "menu_present", False)), left_w=55)
     pdf_two_col_row(pdf, "Menu quality", getattr(result, "menu_quality", "") or "", left_w=55)
@@ -974,6 +851,9 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
     pdf_two_col_row(pdf, "Events", yn(getattr(result, "events_present", False)), left_w=55)
     pdf_two_col_row(pdf, "Unique identity explained", yn(getattr(result, "unique_value_present", False)), left_w=55)
     pdf_two_col_row(pdf, "Website creator", getattr(result, "website_creator", "") or "", left_w=55)
+    pdf_two_col_row(pdf, "Website creator type", getattr(result, "website_creator_type", "") or "", left_w=55)
+    pdf_two_col_row(pdf, "Website creator confidence", getattr(result, "website_creator_confidence", "") or "", left_w=55)
+    pdf_two_col_row(pdf, "Website creator source", getattr(result, "website_creator_source", "") or "", left_w=55)
     pdf_two_col_row(pdf, "Website platform", getattr(result, "website_platform", "") or "", left_w=55)
 
     try:
@@ -993,26 +873,11 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
     pdf.cell(page_w, 8, "Extra data", border=1, align="C")
     pdf.ln(8)
 
-    extra_links = []
-    for label, key in [
-        ("Threads", "threads"),
-        ("YouTube", "youtube"),
-        ("Linktree", "linktree"),
-        ("uqr.to", "uqrto"),
-        ("JustEat", "justeat_url"),
-        ("Deliveroo", "deliveroo_url"),
-        ("Glovo", "glovo_url"),
-        ("Restaurant Guru", "restaurantguru_url"),
-        ("OpenTable", "opentable_url"),
-        ("Quandoo", "quandoo_url"),
-    ]:
-        value = getattr(result, key, "")
-        if value:
-            extra_links.append(f"{label}: {value}")
-
+    pdf_two_col_row(pdf, "Status", compute_status(result), left_w=55)
+    pdf_two_col_row(pdf, "Restaurant match", restaurant_match_txt, left_w=55)
+    pdf_two_col_row(pdf, "Needs review", needs_review_txt, left_w=55)
     pdf_two_col_row(pdf, "non_restaurant reason", getattr(result, "non_restaurant_reason", "") or "", left_w=55)
     pdf_two_col_row(pdf, "Generated at", generated_at, left_w=55)
-    pdf_two_col_row(pdf, "other extra links", " | ".join(extra_links) if extra_links else "", left_w=55)
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     tmp_path = tmp.name
