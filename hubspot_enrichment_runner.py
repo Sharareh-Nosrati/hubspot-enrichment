@@ -975,7 +975,8 @@ def process_one_company(company: Dict[str, Any], ws, existing_ids: set[str]) -> 
     print("DEBUG country:", country)
 
     if already_processed(existing_ids, str(record_id)):
-        print(f"Record {record_id} already exists in Google Sheet - updating it.")
+        print(f"Skipping {record_id}: already processed in Google Sheet")
+        return
 
     if not name or not city:
         note_body = build_missing_requirements_note(name, city, country)
