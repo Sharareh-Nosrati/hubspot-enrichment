@@ -206,6 +206,16 @@ class ResolveResult:
     has_restaurantguru: bool = False
     has_opentable: bool = False
     has_quandoo: bool = False
+    
+    fb_website_link_present: bool = False
+    fb_description_present: bool = False
+    fb_hours_present: bool = False
+    fb_bio_website_link_present: bool = False
+    fb_bio_instagram_link_present: bool = False
+
+    ig_website_link_present: bool = False
+    ig_description_present: bool = False
+    ig_bio_address_present: bool = False
 
     confidence: float = 0.0
     source: str = "none"
@@ -262,6 +272,103 @@ def cache_key(name: str, city: str, country: str) -> str:
 # -----------------------------
 def norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+
+
+def looks_like_address_text(text: str) -> bool:
+    text_n = normalize_for_match(text)
+
+    address_keywords = [
+        "via ", "viale ", "piazza ", "corso ", "vicolo ", "largo ",
+        "street ", "road ", "avenue ", "boulevard ",
+        "avellino", "napoli", "roma", "milano", "torino", "firenze",
+        "indirizzo", "address", "dove siamo", "location"
+    ]
+
+    number_pattern = re.search(r"\b\d{1,4}\b", text_n)
+    return any(k in text_n for k in address_keywords) and bool(number_pattern)
+
+
+def extract_visible_text_from_html(html: str) -> str:
+    soup = BeautifulSoup(html, "lxml")
+    return soup.get_text(" ", strip=True)
+
+
+def analyze_instagram_profile_signals(instagram_url: str) -> Dict[str, Any]:
+    result = {
+        "ig_website_link_present": False,
+        "ig_description_present": False,
+        "ig_bio_address_present": False,
+    }
+
+    html = fetch_url(instagram_url)
+    if not html:
+        return result
+
+    text = extract_visible_text_from_html(html)
+    text_n = normalize_for_match(text)
+
+    external_links = extract_external_links_from_instagram_html(html)
+    clean_links = [u for u in external_links if is_valid_external_link(u)]
+
+    result["ig_website_link_present"] = len(clean_links) > 0
+
+    # Simple bio/description presence heuristic
+    bio_keywords = [
+        "ristorante", "restaurant", "pizzeria", "trattoria", "osteria",
+        "menu", "prenota", "booking", "delivery", "food", "cucina",
+        "chef", "bar", "pub", "wine", "cocktail", "dessert", "dolci"
+    ]
+    result["ig_description_present"] = any(k in text_n for k in bio_keywords)
+
+    result["ig_bio_address_present"] = looks_like_address_text(text)
+
+    return result
+
+
+def analyze_facebook_profile_signals(facebook_url: str) -> Dict[str, Any]:
+    result = {
+        "fb_website_link_present": False,
+        "fb_description_present": False,
+        "fb_hours_present": False,
+        "fb_bio_website_link_present": False,
+        "fb_bio_instagram_link_present": False,
+    }
+
+    html = fetch_url(facebook_url)
+    if not html:
+        return result
+
+    text = extract_visible_text_from_html(html)
+    text_n = normalize_for_match(text)
+
+    external_links = extract_external_links_from_facebook_html(html)
+    clean_links = [u for u in external_links if is_valid_external_link(u)]
+
+    result["fb_website_link_present"] = len(clean_links) > 0
+    result["fb_bio_website_link_present"] = len(clean_links) > 0
+
+    result["fb_bio_instagram_link_present"] = any(
+        "instagram.com" in (u or "").lower() for u in external_links
+    )
+
+    description_keywords = [
+        "ristorante", "restaurant", "pizzeria", "trattoria", "osteria",
+        "menu", "prenota", "booking", "delivery", "food", "cucina",
+        "chef", "bar", "pub", "wine", "cocktail", "dessert", "dolci",
+        "chi siamo", "about", "specialità", "specialita"
+    ]
+    result["fb_description_present"] = any(k in text_n for k in description_keywords)
+
+    hours_keywords = [
+        "open now", "hours", "opening hours", "orari", "oggi aperto",
+        "chiuso", "apre alle", "closes", "lun", "mar", "mer", "gio", "ven", "sab", "dom",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
+    ]
+    result["fb_hours_present"] = any(k in text_n for k in hours_keywords)
+
+    return result
 
 
 def normalize_for_match(s: str) -> str:
@@ -510,6 +617,56 @@ def domain_slug(domain: str) -> str:
     return re.sub(r"[^a-z0-9]", "", domain)
 
 
+
+def count_restaurant_evidence_signals(text: str) -> Dict[str, Any]:
+    text_n = normalize_for_match(text)
+
+    positive_groups = {
+        "identity": [
+            "restaurant", "ristorante", "pizzeria", "trattoria", "osteria", "pub", "bar", "cafe", "bistrot"
+        ],
+        "menu_food": [
+            "menu", "menù", "food", "cucina", "chef", "pizza", "pasta", "dolci", "dessert", "wine", "vino",
+            "cocktail", "drinks", "beer", "birra", "antipasti", "primi", "secondi", "ingredienti"
+        ],
+        "booking_service": [
+            "prenota", "prenotazione", "booking", "reservation", "book a table",
+            "delivery", "takeaway", "asporto", "ordina", "ordine online", "a domicilio"
+        ],
+        "contact_location": [
+            "contatti", "contact", "telefono", "phone", "indirizzo", "address", "dove siamo", "location"
+        ],
+        "branding_story": [
+            "specialità", "specialita", "tradizione", "homemade", "fatto in casa", "nostra storia", "chi siamo"
+        ],
+    }
+
+    negative_terms = [
+        "marketing agency", "digital agency", "web agency", "creative studio",
+        "blog", "magazine", "news", "directory", "listing", "all restaurants",
+        "job", "careers", "supplier", "wholesale", "catalog", "marketplace",
+        "software", "saas", "platform", "template", "theme"
+    ]
+
+    matched_groups = {}
+    total_positive = 0
+
+    for group_name, words in positive_groups.items():
+        hits = [w for w in words if w in text_n]
+        matched_groups[group_name] = hits
+        total_positive += len(hits)
+
+    negatives = [w for w in negative_terms if w in text_n]
+
+    return {
+        "total_positive": total_positive,
+        "matched_groups": matched_groups,
+        "negative_hits": negatives,
+        "group_count": sum(1 for _, hits in matched_groups.items() if hits),
+    }
+
+
+
 def normalized_name_slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", normalize_for_match(name))
 
@@ -526,13 +683,24 @@ def exact_name_phrase_in_text(name: str, text: str) -> bool:
 
 def looks_like_restaurant_context(text: str) -> int:
     text_n = normalize_for_match(text)
-    kws = [
-        "menu", "menù", "ristorante", "restaurant", "pizzeria", "prenota",
-        "reservation", "booking", "delivery", "takeaway", "asporto",
-        "contatti", "contact", "telefono", "phone", "indirizzo", "address",
-        "cucina", "food", "ordina", "book a table"
+
+    keywords = [
+        # generic restaurant
+        "restaurant", "ristorante", "pizzeria", "trattoria", "osteria", "pub", "bar", "cafe", "bistrot",
+        # food and menu
+        "menu", "menù", "carta", "food", "piatti", "cucina", "kitchen", "chef", "antipasti",
+        "primi", "secondi", "dolci", "dessert", "desserts", "wine", "vino", "cocktail", "drinks", "bevande",
+        "birra", "beer", "aperitivo", "aperitivi", "pizza", "pasta", "carne", "pesce", "seafood", "grill",
+        # operations
+        "prenota", "prenotazione", "reservation", "booking", "book a table",
+        "delivery", "takeaway", "asporto", "ordina", "ordine online", "a domicilio",
+        # contact/location
+        "contatti", "contact", "telefono", "phone", "indirizzo", "address", "dove siamo", "location",
+        # service / identity
+        "specialità", "specialita", "tradizione", "homemade", "fatto in casa", "ingredienti", "ingredients",
     ]
-    return sum(1 for k in kws if k in text_n)
+
+    return sum(1 for k in keywords if k in text_n)
 
 
 def city_variants(city: str) -> List[str]:
@@ -952,42 +1120,52 @@ def validate_business_page_content(
     total_tokens = max(len(tokenize_name(name)), 1)
     token_ratio = token_hits / total_tokens
 
-    if exact_name_phrase_in_text(name, title):
-        score += 0.34
-    elif exact_name_phrase_in_text(name, combined):
-        score += 0.28
-    elif token_ratio >= 0.7:
-        score += 0.20
+    exact_title = exact_name_phrase_in_text(name, title)
+    exact_combined = exact_name_phrase_in_text(name, combined)
+
+    if exact_title:
+        score += 0.32
+    elif exact_combined:
+        score += 0.26
+    elif token_ratio >= 0.8:
+        score += 0.18
+    elif token_ratio >= 0.6:
+        score += 0.10
     else:
-        reasons.append("name not matched strongly")
+        reasons.append("weak name match")
 
     fuzzy_title = fuzz.token_set_ratio(normalize_for_match(name), title_n) / 100.0
-    fuzzy_text = fuzz.token_set_ratio(normalize_for_match(name), text_n[:3500]) / 100.0
-    score += min(0.18, max(fuzzy_title, fuzzy_text) * 0.18)
+    fuzzy_text = fuzz.token_set_ratio(normalize_for_match(name), text_n[:4000]) / 100.0
+    fuzzy_best = max(fuzzy_title, fuzzy_text)
+    score += min(0.14, fuzzy_best * 0.14)
 
     target_city_mentions = count_city_mentions(combined, city)
     if target_city_mentions >= 1:
-        score += 0.16
+        score += 0.14
     if target_city_mentions >= 2:
-        score += 0.08
+        score += 0.06
 
-    restaurant_hits = looks_like_restaurant_context(combined)
-    if restaurant_hits >= 1:
-        score += 0.10
-    if restaurant_hits >= 3:
-        score += 0.10
-    if restaurant_hits >= 5:
+    restaurant_info = count_restaurant_evidence_signals(combined)
+    restaurant_signal_count = restaurant_info["total_positive"]
+    restaurant_group_count = restaurant_info["group_count"]
+    negative_hits = restaurant_info["negative_hits"]
+
+    if restaurant_group_count >= 2:
+        score += 0.14
+    if restaurant_group_count >= 3:
+        score += 0.08
+    if restaurant_signal_count >= 8:
         score += 0.08
 
     if is_strong_official_domain(name, url):
-        score += 0.16
+        score += 0.14
 
     phone_found = bool(re.search(r"\+?\d[\d\-\s()]{6,}", text))
     email_found = bool(re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text))
     if phone_found:
-        score += 0.05
-    if email_found:
         score += 0.04
+    if email_found:
+        score += 0.03
 
     bad_listing_terms = [
         "directory", "listing", "all restaurants", "trova locali", "navigator",
@@ -995,24 +1173,40 @@ def validate_business_page_content(
         "local guide", "scheda locale"
     ]
     if any(x in combined for x in bad_listing_terms):
-        score -= 0.25
+        score -= 0.28
         reasons.append("page looks like listing/aggregator")
+
+    if negative_hits:
+        score -= min(0.25, 0.07 * len(negative_hits))
+        reasons.append(f"negative business signals: {', '.join(negative_hits[:4])}")
 
     has_conflict, conflict_city, conflict_mentions = detect_conflicting_city(combined, city)
     if has_conflict:
         score -= 0.45
         reasons.append(f"page strongly points to another city: {conflict_city} ({conflict_mentions} mentions)")
 
-    if token_ratio >= 0.7 and target_city_mentions == 0 and has_conflict:
-        score = min(score, 0.39)
+    # hard rejections
+    if token_ratio < 0.5 and not exact_combined and fuzzy_best < 0.72:
+        score = min(score, 0.44)
+        reasons.append("name match too weak")
+
+    if restaurant_group_count < 2 and restaurant_signal_count < 5:
+        score = min(score, 0.49)
+        reasons.append("restaurant evidence too weak")
+
+    if has_conflict and target_city_mentions == 0:
+        score = min(score, 0.35)
 
     score = max(0.0, min(score, 1.0))
-    final_ok = score >= 0.70
+    final_ok = (
+        score >= 0.72
+        and (exact_combined or token_ratio >= 0.6 or fuzzy_best >= 0.80)
+        and (restaurant_group_count >= 2 or restaurant_signal_count >= 6)
+    )
 
     if final_ok:
         return True, round(score, 3), "official website candidate looks strong"
-    return False, round(score, 3), "; ".join(reasons or ["page too weak"])
-
+    return False, round(score, 3), "; ".join(dict.fromkeys(reasons)) or "page too weak"
 
 def website_validation_details(name: str, city: str, website_url: str) -> Dict[str, Any]:
     result = {
@@ -1778,7 +1972,7 @@ def find_profiles_via_search_router(
             "directory": [],
         }, [f"Router init failed: {e}"], providers_tried
 
-    provider_order = ["serper", "serpapi", "tavily"]
+    provider_order = ["serpapi", "serper", "tavily"]
 
     best_website = None
     best_facebook = None
@@ -1856,11 +2050,15 @@ def find_profiles_via_search_router(
 
 
 def find_instagram_via_search_router(name: str, city: str, country: str):
-    return _find_single_social_via_search_router(name, city, country, "instagram", 0.35)
+    return _find_single_social_via_search_router(name, city, country, "instagram", 0.25)
+
+
+def find_facebook_via_search_router(name: str, city: str, country: str):
+    return _find_single_social_via_search_router(name, city, country, "facebook", 0.30)
 
 
 def find_tiktok_via_search_router(name: str, city: str, country: str):
-    return _find_single_social_via_search_router(name, city, country, "tiktok", 0.45)
+    return _find_single_social_via_search_router(name, city, country, "tiktok", 0.30)
 
 
 def find_google_maps_via_search_router(
@@ -1883,7 +2081,7 @@ def find_google_maps_via_search_router(
         f'"{name}" "{city}" "share.google"',
         f'"{name}" "{city}" "maps.app.goo.gl"',
     ]
-    provider_order = ["serper", "serpapi", "tavily"]
+    provider_order = ["serpapi", "serper", "tavily"]
     best_candidate = None
 
     for provider_name in provider_order:
@@ -1958,7 +2156,7 @@ def find_website_via_search_router(
         f'"{name}" "{city}" official website',
         f'"{name}" "{city}" sito ufficiale',
     ]
-    provider_order = ["serper", "serpapi", "tavily"]
+    provider_order = ["serpapi", "serper", "tavily"]
     best_candidate = None
 
     for provider_name in provider_order:
@@ -2024,7 +2222,7 @@ def _find_single_social_via_search_router(
         f"{name} {city} restaurant {platform}",
         f'{name} "{city}" {platform}',
     ]
-    provider_order = ["serper", "serpapi", "tavily"]
+    provider_order = ["serpapi", "serper", "tavily"]
     best_candidate = None
 
     for provider_name in provider_order:
@@ -2056,12 +2254,10 @@ def _find_single_social_via_search_router(
                         cleaned = None
                     if cleaned and looks_like_non_business_instagram(cleaned, title, snippet):
                         cleaned = None
-
                 elif platform == "facebook":
                     cleaned = clean_social_url(raw_url)
                     if cleaned and "facebook.com" not in cleaned.lower():
                         cleaned = None
-
                 elif platform == "tiktok":
                     cleaned = clean_tiktok_url(raw_url)
                     if cleaned and looks_like_non_business_tiktok(cleaned, title, snippet):
@@ -2502,6 +2698,10 @@ def find_working_domain(name: str, city: str, country: str) -> Tuple[Optional[st
     evidence = []
     domains = guess_possible_domains(name, country)
 
+    best_url = None
+    best_score = -1.0
+    best_reason = ""
+
     for url in domains:
         html = fetch_url(url)
         time.sleep(0.5)
@@ -2513,21 +2713,32 @@ def find_working_domain(name: str, city: str, country: str) -> Tuple[Optional[st
         if is_non_official_website_domain(domain):
             continue
 
-        details = website_validation_details(name, city, url)
+        ok, score, reason = validate_business_page_content(name, city, url, html)
 
-        if details["is_valid"]:
+        if ok and score >= 0.80:
             evidence.append(
                 f"Guessed working domain accepted: {url} "
-                f"(score={details['score']}, reason={details['reason']})"
+                f"(score={score}, reason={reason})"
             )
             return url, evidence
 
+        if score > best_score:
+            best_score = score
+            best_url = url
+            best_reason = reason
+
         evidence.append(
             f"Guessed domain rejected: {url} "
-            f"(score={details['score']}, reason={details['reason']})"
+            f"(score={score}, reason={reason})"
         )
 
-    return None, ["No guessed domain worked"]
+    if best_url:
+        evidence.append(
+            f"Best guessed domain rejected overall: {best_url} "
+            f"(score={best_score}, reason={best_reason})"
+        )
+
+    return None, evidence or ["No guessed domain worked"]
 
 
 # -----------------------------
@@ -2634,56 +2845,47 @@ def assign_social_from_candidate(
     setattr(res, score_field, candidate.score)
     setattr(res, reason_field, candidate.reason)
     setattr(res, found_from_field, candidate.source)
-    
-    
-    
-    
-    
-def find_facebook_via_search_router(name: str, city: str, country: str):
-    return _find_single_social_via_search_router(name, city, country, "facebook", 0.30)
 
 
 def enrich_from_website_html(res: ResolveResult, html: str, source_label: str, evidence: List[str]) -> None:
     links_data = extract_links_from_html(html)
 
-    def assign_if_better(
+    def assign_if_missing(
         field: str,
         score_field: str,
         reason_field: str,
         found_from_field: str,
         value: Optional[str],
         label: str,
-        min_replace_score: float = 0.85,
     ):
         if not value:
             return
 
         current_value = getattr(res, field, None)
-        current_score = getattr(res, score_field, 0.0) or 0.0
+        if current_value:
+            return
 
-        if (not current_value) or (current_score < min_replace_score):
-            setattr(res, field, value)
-            setattr(res, score_field, max(current_score, 0.90))
-            setattr(res, reason_field, f"Found directly in {source_label} HTML")
-            setattr(res, found_from_field, source_label)
-            evidence.append(f"{label} extracted from {source_label}")
+        setattr(res, field, value)
+        setattr(res, score_field, 0.90)
+        setattr(res, reason_field, f"Found directly in {source_label} HTML")
+        setattr(res, found_from_field, source_label)
+        evidence.append(f"{label} extracted from {source_label}")
 
-    assign_if_better("instagram", "instagram_score", "instagram_match_reason", "instagram_found_from", links_data.get("instagram"), "Instagram")
-    assign_if_better("facebook", "facebook_score", "facebook_match_reason", "facebook_found_from", links_data.get("facebook"), "Facebook")
-    assign_if_better("tiktok", "tiktok_score", "tiktok_match_reason", "tiktok_found_from", links_data.get("tiktok"), "TikTok")
-    assign_if_better("threads", "threads_score", "threads_match_reason", "threads_found_from", links_data.get("threads"), "Threads")
-    assign_if_better("x", "x_score", "x_match_reason", "x_found_from", links_data.get("x"), "X")
-    assign_if_better("youtube", "youtube_score", "youtube_match_reason", "youtube_found_from", links_data.get("youtube"), "YouTube")
-    assign_if_better("linktree", "linktree_score", "linktree_match_reason", "linktree_found_from", links_data.get("linktree"), "Linktree")
-    assign_if_better("uqrto", "uqrto_score", "uqrto_match_reason", "uqrto_found_from", links_data.get("uqrto"), "uqr.to")
+    assign_if_missing("instagram", "instagram_score", "instagram_match_reason", "instagram_found_from", links_data.get("instagram"), "Instagram")
+    assign_if_missing("facebook", "facebook_score", "facebook_match_reason", "facebook_found_from", links_data.get("facebook"), "Facebook")
+    assign_if_missing("tiktok", "tiktok_score", "tiktok_match_reason", "tiktok_found_from", links_data.get("tiktok"), "TikTok")
+    assign_if_missing("threads", "threads_score", "threads_match_reason", "threads_found_from", links_data.get("threads"), "Threads")
+    assign_if_missing("x", "x_score", "x_match_reason", "x_found_from", links_data.get("x"), "X")
+    assign_if_missing("youtube", "youtube_score", "youtube_match_reason", "youtube_found_from", links_data.get("youtube"), "YouTube")
+    assign_if_missing("linktree", "linktree_score", "linktree_match_reason", "linktree_found_from", links_data.get("linktree"), "Linktree")
+    assign_if_missing("uqrto", "uqrto_score", "uqrto_match_reason", "uqrto_found_from", links_data.get("uqrto"), "uqr.to")
 
     if res.tiktok:
         res.tiktok_present = True
 
-    if links_data.get("google_maps"):
-        if not res.google_maps_url:
-            res.google_maps_url = links_data["google_maps"]
-            evidence.append(f"Google Maps extracted from {source_label}")
+    if links_data.get("google_maps") and not res.google_maps_url:
+        res.google_maps_url = links_data["google_maps"]
+        evidence.append(f"Google Maps extracted from {source_label}")
 
     res.directory_links_json = append_unique_json_list(
         res.directory_links_json,
@@ -2883,7 +3085,7 @@ def enrich_from_valid_website(res: ResolveResult, evidence: List[str], source_la
 
 
 def try_upgrade_website_from_candidates(res: ResolveResult, name: str, city: str, evidence: List[str]) -> None:
-    if res.website and res.website_validated and res.website_validation_score >= 0.70:
+    if res.website and res.website_validated and res.website_validation_score >= 0.72:
         return
 
     candidates = json_list(res.official_website_candidates_json)
@@ -2897,12 +3099,13 @@ def try_upgrade_website_from_candidates(res: ResolveResult, name: str, city: str
     for url in candidates:
         details = website_validation_details(name, city, url)
         score = details.get("score", 0.0)
+
         if details.get("is_valid") and score > best_score:
             best_url = url
             best_score = score
             best_reason = details.get("reason", "")
 
-    if best_url and best_score >= 0.70:
+    if best_url and best_score >= 0.74:
         res.website = best_url
         res.website_score = max(res.website_score, best_score)
         res.website_validated = True
@@ -2911,7 +3114,6 @@ def try_upgrade_website_from_candidates(res: ResolveResult, name: str, city: str
         res.website_match_reason = "Upgraded from website candidates"
         res.website_found_from = "website_candidates"
         evidence.append(f"Website upgraded from candidates: {best_url} (score={best_score})")
-
 
 # -----------------------------
 # Main resolver
@@ -3101,10 +3303,21 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
         if ig_primary_link and is_valid_external_link(ig_primary_link):
             res.instagram_primary_external_link = ig_primary_link
             evidence.append(f"Instagram primary external link found: {ig_primary_link}")
-            
-            
-        if not res.facebook:
-            facebook_candidate, ev, providers_tried = find_facebook_via_search_router(primary_search_name, city, country)
+        
+        ig_profile_signals = analyze_instagram_profile_signals(res.instagram)
+        res.ig_website_link_present = ig_profile_signals["ig_website_link_present"]
+        res.ig_description_present = ig_profile_signals["ig_description_present"]
+        res.ig_bio_address_present = ig_profile_signals["ig_bio_address_present"]
+
+        evidence.append(
+            "Instagram profile signals: "
+            f"website_link_present={res.ig_website_link_present}, "
+            f"description_present={res.ig_description_present}, "
+            f"bio_address_present={res.ig_bio_address_present}"
+        )
+
+    if not res.facebook:
+        facebook_candidate, ev, providers_tried = find_facebook_via_search_router(primary_search_name, city, country)
         evidence += ev
         evidence.append(f"Providers tried for Facebook search: {providers_tried}")
 
@@ -3136,6 +3349,22 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
         if fb_primary_link and is_valid_external_link(fb_primary_link):
             res.facebook_primary_external_link = fb_primary_link
             evidence.append(f"Facebook primary external link found: {fb_primary_link}")
+        
+        fb_profile_signals = analyze_facebook_profile_signals(res.facebook)
+        res.fb_website_link_present = fb_profile_signals["fb_website_link_present"]
+        res.fb_description_present = fb_profile_signals["fb_description_present"]
+        res.fb_hours_present = fb_profile_signals["fb_hours_present"]
+        res.fb_bio_website_link_present = fb_profile_signals["fb_bio_website_link_present"]
+        res.fb_bio_instagram_link_present = fb_profile_signals["fb_bio_instagram_link_present"]
+
+        evidence.append(
+            "Facebook profile signals: "
+            f"website_link_present={res.fb_website_link_present}, "
+            f"description_present={res.fb_description_present}, "
+            f"hours_present={res.fb_hours_present}, "
+            f"bio_website_link_present={res.fb_bio_website_link_present}, "
+            f"bio_instagram_link_present={res.fb_bio_instagram_link_present}"
+        )
 
     if not res.tiktok:
         tiktok_candidate, ev, providers_tried = find_tiktok_via_search_router(primary_search_name, city, country)

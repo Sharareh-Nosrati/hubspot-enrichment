@@ -136,6 +136,14 @@ RESULT_FIELDS = [
     "website_completeness_score",
     "website_strengths_json",
     "website_weaknesses_json",
+    "fb_website_link_present",
+    "fb_description_present",
+    "fb_hours_present",
+    "fb_bio_website_link_present",
+    "fb_bio_instagram_link_present",
+    "ig_website_link_present",
+    "ig_description_present",
+    "ig_bio_address_present",
     "is_restaurant_match",
     "non_restaurant_reason",
     "tiktok_present",
@@ -243,6 +251,14 @@ def normalize_value(key: str, value: Any) -> str:
         "unique_value_present",
         "is_restaurant_match",
         "tiktok_present",
+        "fb_website_link_present",
+        "fb_description_present",
+        "fb_hours_present",
+        "fb_bio_website_link_present",
+        "fb_bio_instagram_link_present",
+        "ig_website_link_present",
+        "ig_description_present",
+        "ig_bio_address_present",
     }
 
     float_fields = {
@@ -705,6 +721,24 @@ def build_note_body(result, record_id: str, name: str, city: str, country: str) 
         f"Website platform: {safe_text(getattr(result, 'website_platform', '') or '-')}<br>"
         f"Website strengths: {safe_text(' | '.join(website_strengths) if website_strengths else '-')}<br>"
         f"Website weaknesses: {safe_text(' | '.join(website_weaknesses) if website_weaknesses else '-')}<br><br>"
+        
+        f"<b>Social checklist:</b><br>"
+        f"Has Facebook page: {bool_to_yes_no(bool(getattr(result, 'facebook', '')))}<br>"
+        f"Has Instagram page: {bool_to_yes_no(bool(getattr(result, 'instagram', '')))}<br><br>"
+
+        f"<b>Facebook checks:</b><br>"
+        f"FB Website link present: {bool_to_yes_no(getattr(result, 'fb_website_link_present', False))}<br>"
+        f"FB Description present: {bool_to_yes_no(getattr(result, 'fb_description_present', False))}<br>"
+        f"FB Bio opening days & hours present: {bool_to_yes_no(getattr(result, 'fb_hours_present', False))}<br>"
+        f"FB Bio website link present: {bool_to_yes_no(getattr(result, 'fb_bio_website_link_present', False))}<br>"
+        f"FB Bio Instagram link present: {bool_to_yes_no(getattr(result, 'fb_bio_instagram_link_present', False))}<br>"
+        f"Facebook primary external link: {html_link(getattr(result, 'facebook_primary_external_link', ''), 'Open link') if getattr(result, 'facebook_primary_external_link', '') else 'Not found'}<br><br>"
+
+        f"<b>Instagram checks:</b><br>"
+        f"IG Website link present: {bool_to_yes_no(getattr(result, 'ig_website_link_present', False))}<br>"
+        f"IG Description present: {bool_to_yes_no(getattr(result, 'ig_description_present', False))}<br>"
+        f"IG Bio address present: {bool_to_yes_no(getattr(result, 'ig_bio_address_present', False))}<br>"
+        f"Instagram primary external link: {html_link(getattr(result, 'instagram_primary_external_link', ''), 'Open link') if getattr(result, 'instagram_primary_external_link', '') else 'Not found'}<br><br>"
 
         f"<b>Extra data</b><br>"
         f"Status: {safe_text(compute_status(result))}<br>"
@@ -833,6 +867,23 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
 
     for row in rows:
         pdf_table_row(pdf, [col1, col2, col3, col4, col5, col6], row)
+        
+    pdf.set_font("helvetica", "B", 11)
+    pdf.cell(page_w, 8, "Social checklist", border=1, align="C")
+    pdf.ln(8)
+
+    pdf_two_col_row(pdf, "Has Facebook page", yn(bool(getattr(result, "facebook", ""))), left_w=60)
+    pdf_two_col_row(pdf, "Has Instagram page", yn(bool(getattr(result, "instagram", ""))), left_w=60)
+    pdf_two_col_row(pdf, "FB Website link present", yn(getattr(result, "fb_website_link_present", False)), left_w=60)
+    pdf_two_col_row(pdf, "FB Description present", yn(getattr(result, "fb_description_present", False)), left_w=60)
+    pdf_two_col_row(pdf, "FB Bio opening days & hours present", yn(getattr(result, "fb_hours_present", False)), left_w=60)
+    pdf_two_col_row(pdf, "FB Bio website link present", yn(getattr(result, "fb_bio_website_link_present", False)), left_w=60)
+    pdf_two_col_row(pdf, "FB Bio Instagram link present", yn(getattr(result, "fb_bio_instagram_link_present", False)), left_w=60)
+    pdf_two_col_row(pdf, "Facebook primary external link", getattr(result, "facebook_primary_external_link", "") or "Not found", left_w=60)
+    pdf_two_col_row(pdf, "IG Website link present", yn(getattr(result, "ig_website_link_present", False)), left_w=60)
+    pdf_two_col_row(pdf, "IG Description present", yn(getattr(result, "ig_description_present", False)), left_w=60)
+    pdf_two_col_row(pdf, "IG Bio address present", yn(getattr(result, "ig_bio_address_present", False)), left_w=60)
+    pdf_two_col_row(pdf, "Instagram primary external link", getattr(result, "instagram_primary_external_link", "") or "Not found", left_w=60)
 
     pdf.set_font("helvetica", "B", 11)
     pdf.cell(page_w, 8, "Instagram external link", border=1, align="C")

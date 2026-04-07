@@ -56,7 +56,7 @@ class SearchResponse:
 
 @dataclass
 class ProviderPolicy:
-    min_results: int = 3
+    min_results: int = 1
     min_top_score: float = 0.35
     timeout_sec: int = DEFAULT_TIMEOUT_SEC
 
@@ -466,13 +466,11 @@ class SearchRouter:
     def _is_good_enough(self, resp: SearchResponse) -> bool:
         if not resp.ok:
             return False
-        if not resp.results:
+        if len(resp.results) < self.config.policy.min_results:
             return False
 
         top = max((r.score for r in resp.results), default=0.0)
-        strong_results = sum(1 for r in resp.results if r.score >= 0.35)
-
-        return top >= self.config.policy.min_top_score and strong_results >= 1
+        return top >= self.config.policy.min_top_score
 
     def search(self, query: str, **kwargs: Any) -> SearchResponse:
         debug_log: List[Dict[str, Any]] = []
@@ -551,6 +549,7 @@ class SearchRouter:
             meta={"debug": debug_log},
         )
 
+
 # ============================================================
 # Factory
 # ============================================================
@@ -610,10 +609,13 @@ def extract_business_profiles(results: List[SearchResult]) -> Dict[str, Optional
         "instagram": instagram,
     }
 
+
 if __name__ == "__main__":
     router = build_router()
 
-    query = f"{name} {city} restaurant ristorante pizzeria official website facebook instagram"
+    demo_name = "Ristorante Black Moon"
+    demo_city = "Avellino"
+    query = f"{demo_name} {demo_city} restaurant ristorante pizzeria official website facebook instagram"
 
     response = router.search(
         query,
@@ -635,6 +637,7 @@ if __name__ == "__main__":
         print("DOMAIN:", r.domain)
         print("SCORE:", r.score)
         print("SNIPPET:", r.snippet[:220])
+
     profiles = extract_business_profiles(response.results)
     print("\nFINAL PROFILES:")
     print(json.dumps(profiles, indent=2, ensure_ascii=False))
