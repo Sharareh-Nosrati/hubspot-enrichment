@@ -762,38 +762,42 @@ def pdf_two_col_row(pdf: FPDF, left: str, right: str, left_w: float = 70) -> Non
     y = pdf.get_y()
     x = pdf.get_x()
 
+    left_txt = safe_text(left)
+    right_txt = safe_text(right)
+
     pdf.set_font("helvetica", "", 10)
 
-    left_lines = max(1, len(safe_text(left)) // 30 + 1)
-    right_lines = max(1, len(safe_text(right)) // 55 + 1)
-    row_h = max(8, max(left_lines, right_lines) * 5)
+    left_lines = max(1, len(left_txt) // 28 + 1)
+    right_lines = max(1, len(right_txt) // 70 + 1)
+    row_h = max(7, max(left_lines, right_lines) * 5)
 
     pdf.set_xy(x, y)
-    pdf.multi_cell(left_w, row_h, safe_text(left), border=1, align="C")
+    pdf.multi_cell(left_w, row_h, left_txt, border=1, align="L")
     pdf.set_xy(x + left_w, y)
-    pdf.multi_cell(right_w, row_h, safe_text(right), border=1, align="C")
+    pdf.multi_cell(right_w, row_h, right_txt, border=1, align="L")
     pdf.set_xy(x, y + row_h)
 
 
-def pdf_table_row(pdf: FPDF, widths: List[float], cells: List[str], bold: bool = False, align: str = "C") -> None:
+def pdf_table_row(pdf: FPDF, widths: List[float], cells: List[str], bold: bool = False, align: str = "L") -> None:
     pdf.set_font("helvetica", "B" if bold else "", 9)
 
+    cleaned_cells = [safe_text(c) for c in cells]
     line_counts = []
-    for txt, w in zip(cells, widths):
-        text = safe_text(txt)
-        approx_chars_per_line = max(8, int(w / 2))
-        line_count = max(1, len(text) // approx_chars_per_line + 1)
+
+    for txt, w in zip(cleaned_cells, widths):
+        approx_chars_per_line = max(8, int(w / 2.4))
+        line_count = max(1, len(txt) // approx_chars_per_line + 1)
         line_counts.append(line_count)
 
-    row_h = max(8, max(line_counts) * 5)
+    row_h = max(7, max(line_counts) * 5)
 
     x0 = pdf.get_x()
     y0 = pdf.get_y()
     current_x = x0
 
-    for txt, w in zip(cells, widths):
+    for txt, w in zip(cleaned_cells, widths):
         pdf.set_xy(current_x, y0)
-        pdf.multi_cell(w, row_h, safe_text(txt), border=1, align=align)
+        pdf.multi_cell(w, row_h, txt, border=1, align=align)
         current_x += w
 
     pdf.set_xy(x0, y0 + row_h)
@@ -814,30 +818,49 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
         except Exception:
             return ""
 
+    def clean_display(v, fallback="-"):
+        txt = safe_text(v)
+        return txt if txt else fallback
+
+    def truncate_text(v, max_len=110):
+        txt = clean_display(v, "")
+        if len(txt) <= max_len:
+            return txt
+        return txt[:max_len - 3] + "..."
+
+    def section_title(title: str):
+        pdf.set_font("helvetica", "B", 11)
+        pdf.cell(page_w, 8, safe_text(title), border=1, align="C")
+        pdf.ln(8)
+
     page_w = pdf.w - pdf.l_margin - pdf.r_margin
-
-    col1 = 36
-    col2 = 88
-    col3 = 28
-    col4 = 28
-    col5 = 28
-    col6 = page_w - (col1 + col2 + col3 + col4 + col5)
-
     generated_at = datetime.now(timezone.utc).isoformat()
+
+    # Cleaner table widths
+    col1 = 34   # label
+    col2 = 96   # link
+    col3 = 22   # score
+    col4 = 24   # review
+    col5 = 24   # match
+    col6 = page_w - (col1 + col2 + col3 + col4 + col5)  # source
 
     pdf.set_font("helvetica", "B", 12)
     pdf.cell(page_w, 8, "Online Presence Analysis HubSpot", border=1, align="C")
     pdf.ln(8)
 
-    pdf_two_col_row(pdf, "Record ID:", record_id, left_w=48)
-    pdf_two_col_row(pdf, "Restaurant:", name, left_w=48)
-    pdf_two_col_row(pdf, "City:", city, left_w=48)
-    pdf_two_col_row(pdf, "Country:", country, left_w=48)
+    # Top info
+    pdf_two_col_row(pdf, "Record ID", clean_display(record_id), left_w=48)
+    pdf_two_col_row(pdf, "Restaurant", clean_display(name), left_w=48)
+    pdf_two_col_row(pdf, "City", clean_display(city), left_w=48)
+    pdf_two_col_row(pdf, "Country", clean_display(country), left_w=48)
+
+    # Digital presence
+    section_title("Digital Presence")
 
     pdf_table_row(
         pdf,
         [col1, col2, col3, col4, col5, col6],
-        ["Digital presence", "Link", "Score", "Needs review", "Match", "Source"],
+        ["Channel", "Link", "Score", "Review", "Match", "Source"],
         bold=True
     )
 
@@ -845,32 +868,33 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
     restaurant_match_txt = yn(getattr(result, "is_restaurant_match", False))
 
     rows = [
-        ["Website", getattr(result, "website", "") or "", pct(getattr(result, "website_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "website_found_from", "") or getattr(result, "source", "")],
-        ["Instagram", getattr(result, "instagram", "") or "", pct(getattr(result, "instagram_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "instagram_found_from", "")],
-        ["Facebook", getattr(result, "facebook", "") or "", pct(getattr(result, "facebook_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "facebook_found_from", "")],
-        ["TikTok", getattr(result, "tiktok", "") or "", pct(getattr(result, "tiktok_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "tiktok_found_from", "")],
-        ["Threads", getattr(result, "threads", "") or "", pct(getattr(result, "threads_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "threads_found_from", "")],
-        ["X", getattr(result, "x", "") or "", pct(getattr(result, "x_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "x_found_from", "")],
-        ["YouTube", getattr(result, "youtube", "") or "", pct(getattr(result, "youtube_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "youtube_found_from", "")],
-        ["Linktree", getattr(result, "linktree", "") or "", pct(getattr(result, "linktree_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "linktree_found_from", "")],
-        ["uqr.to", getattr(result, "uqrto", "") or "", pct(getattr(result, "uqrto_score", "")), needs_review_txt, restaurant_match_txt, getattr(result, "uqrto_found_from", "")],
-        ["Google Maps", getattr(result, "google_maps_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
-        ["TheFork", getattr(result, "thefork_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
-        ["Tripadvisor", getattr(result, "tripadvisor_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
-        ["JustEat", getattr(result, "justeat_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
-        ["Deliveroo", getattr(result, "deliveroo_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
-        ["Glovo", getattr(result, "glovo_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
-        ["Restaurant Guru", getattr(result, "restaurantguru_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
-        ["OpenTable", getattr(result, "opentable_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
-        ["Quandoo", getattr(result, "quandoo_url", "") or "", pct(getattr(result, "confidence", "")), needs_review_txt, restaurant_match_txt, getattr(result, "source", "")],
+        ["Website", getattr(result, "website", "") or "Not found", pct(getattr(result, "website_score", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "website_found_from", "") or getattr(result, "source", ""), "-")],
+        ["Instagram", getattr(result, "instagram", "") or "Not found", pct(getattr(result, "instagram_score", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "instagram_found_from", ""), "-")],
+        ["Facebook", getattr(result, "facebook", "") or "Not found", pct(getattr(result, "facebook_score", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "facebook_found_from", ""), "-")],
+        ["TikTok", getattr(result, "tiktok", "") or "Not found", pct(getattr(result, "tiktok_score", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "tiktok_found_from", ""), "-")],
+        ["Threads", getattr(result, "threads", "") or "Not found", pct(getattr(result, "threads_score", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "threads_found_from", ""), "-")],
+        ["X", getattr(result, "x", "") or "Not found", pct(getattr(result, "x_score", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "x_found_from", ""), "-")],
+        ["YouTube", getattr(result, "youtube", "") or "Not found", pct(getattr(result, "youtube_score", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "youtube_found_from", ""), "-")],
+        ["Linktree", getattr(result, "linktree", "") or "Not found", pct(getattr(result, "linktree_score", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "linktree_found_from", ""), "-")],
+        ["uqr.to", getattr(result, "uqrto", "") or "Not found", pct(getattr(result, "uqrto_score", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "uqrto_found_from", ""), "-")],
+        ["Google Maps", getattr(result, "google_maps_url", "") or "Not found", pct(getattr(result, "confidence", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "source", ""), "-")],
+        ["TheFork", getattr(result, "thefork_url", "") or "Not found", pct(getattr(result, "confidence", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "source", ""), "-")],
+        ["Tripadvisor", getattr(result, "tripadvisor_url", "") or "Not found", pct(getattr(result, "confidence", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "source", ""), "-")],
+        ["JustEat", getattr(result, "justeat_url", "") or "Not found", pct(getattr(result, "confidence", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "source", ""), "-")],
+        ["Deliveroo", getattr(result, "deliveroo_url", "") or "Not found", pct(getattr(result, "confidence", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "source", ""), "-")],
+        ["Glovo", getattr(result, "glovo_url", "") or "Not found", pct(getattr(result, "confidence", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "source", ""), "-")],
+        ["Restaurant Guru", getattr(result, "restaurantguru_url", "") or "Not found", pct(getattr(result, "confidence", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "source", ""), "-")],
+        ["OpenTable", getattr(result, "opentable_url", "") or "Not found", pct(getattr(result, "confidence", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "source", ""), "-")],
+        ["Quandoo", getattr(result, "quandoo_url", "") or "Not found", pct(getattr(result, "confidence", "")) or "-", needs_review_txt, restaurant_match_txt, clean_display(getattr(result, "source", ""), "-")],
     ]
 
     for row in rows:
+        row[1] = truncate_text(row[1], 95)
+        row[5] = truncate_text(row[5], 42)
         pdf_table_row(pdf, [col1, col2, col3, col4, col5, col6], row)
-        
-    pdf.set_font("helvetica", "B", 11)
-    pdf.cell(page_w, 8, "Social checklist", border=1, align="C")
-    pdf.ln(8)
+
+    # Social checklist
+    section_title("Social Checklist")
 
     pdf_two_col_row(pdf, "Has Facebook page", yn(bool(getattr(result, "facebook", ""))), left_w=60)
     pdf_two_col_row(pdf, "Has Instagram page", yn(bool(getattr(result, "instagram", ""))), left_w=60)
@@ -879,32 +903,20 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
     pdf_two_col_row(pdf, "FB Bio opening days & hours present", yn(getattr(result, "fb_hours_present", False)), left_w=60)
     pdf_two_col_row(pdf, "FB Bio website link present", yn(getattr(result, "fb_bio_website_link_present", False)), left_w=60)
     pdf_two_col_row(pdf, "FB Bio Instagram link present", yn(getattr(result, "fb_bio_instagram_link_present", False)), left_w=60)
-    pdf_two_col_row(pdf, "Facebook primary external link", getattr(result, "facebook_primary_external_link", "") or "Not found", left_w=60)
+    pdf_two_col_row(pdf, "Facebook primary external link", truncate_text(getattr(result, "facebook_primary_external_link", "") or "Not found", 120), left_w=60)
     pdf_two_col_row(pdf, "IG Website link present", yn(getattr(result, "ig_website_link_present", False)), left_w=60)
     pdf_two_col_row(pdf, "IG Description present", yn(getattr(result, "ig_description_present", False)), left_w=60)
     pdf_two_col_row(pdf, "IG Bio address present", yn(getattr(result, "ig_bio_address_present", False)), left_w=60)
-    pdf_two_col_row(pdf, "Instagram primary external link", getattr(result, "instagram_primary_external_link", "") or "Not found", left_w=60)
+    pdf_two_col_row(pdf, "Instagram primary external link", truncate_text(getattr(result, "instagram_primary_external_link", "") or "Not found", 120), left_w=60)
 
-    pdf.set_font("helvetica", "B", 11)
-    pdf.cell(page_w, 8, "Instagram external link", border=1, align="C")
-    pdf.ln(8)
+    # Website analysis
+    section_title("Website Analysis")
 
-    pdf_two_col_row(
-        pdf,
-        "Instagram primary external link",
-        getattr(result, "instagram_primary_external_link", "") or "Not found",
-        left_w=55
-    )
-    
-    pdf.set_font("helvetica", "B", 11)
-    pdf.cell(page_w, 8, "Website analysis", border=1, align="C")
-    pdf.ln(8)
-
-    pdf_two_col_row(pdf, "Website type", getattr(result, "website_type", "") or "", left_w=55)
+    pdf_two_col_row(pdf, "Website type", clean_display(getattr(result, "website_type", ""), "-"), left_w=55)
     pdf_two_col_row(pdf, "Website validated", yn(getattr(result, "website_validated", False)), left_w=55)
-    pdf_two_col_row(pdf, "Website completeness score", pct(getattr(result, "website_completeness_score", "")) or "", left_w=55)
+    pdf_two_col_row(pdf, "Website completeness score", pct(getattr(result, "website_completeness_score", "")) or "-", left_w=55)
     pdf_two_col_row(pdf, "Menu", yn(getattr(result, "menu_present", False)), left_w=55)
-    pdf_two_col_row(pdf, "Menu quality", getattr(result, "menu_quality", "") or "", left_w=55)
+    pdf_two_col_row(pdf, "Menu quality", clean_display(getattr(result, "menu_quality", ""), "-"), left_w=55)
     pdf_two_col_row(pdf, "Booking Online", yn(getattr(result, "booking_present", False)), left_w=55)
     pdf_two_col_row(pdf, "Delivery", yn(getattr(result, "delivery_present", False)), left_w=55)
     pdf_two_col_row(pdf, "Data Capture", yn(getattr(result, "data_capture_present", False)), left_w=55)
@@ -914,11 +926,11 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
     pdf_two_col_row(pdf, "Offers / Promos", yn(getattr(result, "offers_promos_present", False)), left_w=55)
     pdf_two_col_row(pdf, "Events", yn(getattr(result, "events_present", False)), left_w=55)
     pdf_two_col_row(pdf, "Unique identity explained", yn(getattr(result, "unique_value_present", False)), left_w=55)
-    pdf_two_col_row(pdf, "Website creator", getattr(result, "website_creator", "") or "", left_w=55)
-    pdf_two_col_row(pdf, "Website creator type", getattr(result, "website_creator_type", "") or "", left_w=55)
-    pdf_two_col_row(pdf, "Website creator confidence", getattr(result, "website_creator_confidence", "") or "", left_w=55)
-    pdf_two_col_row(pdf, "Website creator source", getattr(result, "website_creator_source", "") or "", left_w=55)
-    pdf_two_col_row(pdf, "Website platform", getattr(result, "website_platform", "") or "", left_w=55)
+    pdf_two_col_row(pdf, "Website creator", clean_display(getattr(result, "website_creator", ""), "-"), left_w=55)
+    pdf_two_col_row(pdf, "Website creator type", clean_display(getattr(result, "website_creator_type", ""), "-"), left_w=55)
+    pdf_two_col_row(pdf, "Website creator confidence", clean_display(getattr(result, "website_creator_confidence", ""), "-"), left_w=55)
+    pdf_two_col_row(pdf, "Website creator source", clean_display(getattr(result, "website_creator_source", ""), "-"), left_w=55)
+    pdf_two_col_row(pdf, "Website platform", clean_display(getattr(result, "website_platform", ""), "-"), left_w=55)
 
     try:
         strengths = json.loads(getattr(result, "website_strengths_json", "[]") or "[]")
@@ -930,18 +942,27 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
     except Exception:
         weaknesses = []
 
-    pdf_two_col_row(pdf, "Website strengths", " | ".join(strengths) if strengths else "", left_w=55)
-    pdf_two_col_row(pdf, "Website weaknesses", " | ".join(weaknesses) if weaknesses else "", left_w=55)
+    pdf_two_col_row(
+        pdf,
+        "Website strengths",
+        truncate_text(" | ".join(strengths) if strengths else "-", 140),
+        left_w=55
+    )
+    pdf_two_col_row(
+        pdf,
+        "Website weaknesses",
+        truncate_text(" | ".join(weaknesses) if weaknesses else "-", 140),
+        left_w=55
+    )
 
-    pdf.set_font("helvetica", "B", 11)
-    pdf.cell(page_w, 8, "Extra data", border=1, align="C")
-    pdf.ln(8)
+    # Extra data
+    section_title("Extra Data")
 
-    pdf_two_col_row(pdf, "Status", compute_status(result), left_w=55)
+    pdf_two_col_row(pdf, "Status", clean_display(compute_status(result), "-"), left_w=55)
     pdf_two_col_row(pdf, "Restaurant match", restaurant_match_txt, left_w=55)
     pdf_two_col_row(pdf, "Needs review", needs_review_txt, left_w=55)
-    pdf_two_col_row(pdf, "non_restaurant reason", getattr(result, "non_restaurant_reason", "") or "", left_w=55)
-    pdf_two_col_row(pdf, "Generated at", generated_at, left_w=55)
+    pdf_two_col_row(pdf, "Non restaurant reason", clean_display(getattr(result, "non_restaurant_reason", ""), "-"), left_w=55)
+    pdf_two_col_row(pdf, "Generated at", clean_display(generated_at, "-"), left_w=55)
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     tmp_path = tmp.name
