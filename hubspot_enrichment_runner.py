@@ -680,6 +680,9 @@ def build_note_body(result, record_id: str, name: str, city: str, country: str) 
         f"<b>Digital presence links:</b><br>"
         f"{links_html}<br>"
 
+        f"<b>Instagram external link:</b><br>"
+        f"Instagram primary external link: {html_link(getattr(result, 'instagram_primary_external_link', ''), 'Open link') if getattr(result, 'instagram_primary_external_link', '') else 'Not found'}<br><br>"
+
         f"<b>Website analysis:</b><br>"
         f"Website type: {safe_text(getattr(result, 'website_type', '') or 'Unknown')}<br>"
         f"Website validated: {bool_to_yes_no(getattr(result, 'website_validated', False))}<br>"
@@ -710,7 +713,6 @@ def build_note_body(result, record_id: str, name: str, city: str, country: str) 
         f"non_restaurant reason: {safe_text(getattr(result, 'non_restaurant_reason', '') or '')}<br>"
         f"Generated at: {safe_text(generated_at)}"
     )
-
 
 class ReportPDF(FPDF):
     pass
@@ -832,6 +834,17 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
     for row in rows:
         pdf_table_row(pdf, [col1, col2, col3, col4, col5, col6], row)
 
+    pdf.set_font("helvetica", "B", 11)
+    pdf.cell(page_w, 8, "Instagram external link", border=1, align="C")
+    pdf.ln(8)
+
+    pdf_two_col_row(
+        pdf,
+        "Instagram primary external link",
+        getattr(result, "instagram_primary_external_link", "") or "Not found",
+        left_w=55
+    )
+    
     pdf.set_font("helvetica", "B", 11)
     pdf.cell(page_w, 8, "Website analysis", border=1, align="C")
     pdf.ln(8)
