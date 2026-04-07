@@ -755,8 +755,7 @@ def pdf_full_width(pdf: FPDF) -> float:
 
 
 def pdf_ensure_space(pdf: FPDF, needed_h: float) -> None:
-    bottom_limit = pdf.h - pdf.b_margin
-    if pdf.get_y() + needed_h > bottom_limit:
+    if pdf.get_y() + needed_h > (pdf.h - pdf.b_margin):
         pdf.add_page()
 
 
@@ -765,6 +764,12 @@ def pdf_section_title(pdf: FPDF, text: str) -> None:
     pdf.set_font("helvetica", "B", 11)
     pdf.cell(pdf_full_width(pdf), 8, safe_text(text), border=1, align="C")
     pdf.ln(8)
+
+
+def estimate_lines(text: str, width: float) -> int:
+    txt = safe_text(text or "-")
+    approx_chars_per_line = max(8, int(width / 2.3))
+    return max(1, len(txt) // approx_chars_per_line + 1)
 
 
 def pdf_two_col_row(pdf: FPDF, left: str, right: str, left_w: float = 70) -> None:
@@ -776,51 +781,49 @@ def pdf_two_col_row(pdf: FPDF, left: str, right: str, left_w: float = 70) -> Non
 
     pdf.set_font("helvetica", "", 10)
 
-    left_chars = max(12, int(left_w / 2.4))
-    right_chars = max(18, int(right_w / 2.4))
+    left_lines = estimate_lines(left_txt, left_w)
+    right_lines = estimate_lines(right_txt, right_w)
 
-    left_lines = max(1, len(left_txt) // left_chars + 1)
-    right_lines = max(1, len(right_txt) // right_chars + 1)
-    row_h = max(7, max(left_lines, right_lines) * 5)
+    line_h = 5
+    row_h = max(line_h * left_lines, line_h * right_lines, 8)
 
     pdf_ensure_space(pdf, row_h + 1)
 
-    x = pdf.get_x()
-    y = pdf.get_y()
+    x0 = pdf.get_x()
+    y0 = pdf.get_y()
 
-    pdf.set_xy(x, y)
-    pdf.multi_cell(left_w, 5, left_txt, border=1, align="L")
+    # Left cell
+    pdf.set_xy(x0, y0)
+    pdf.multi_cell(left_w, line_h, left_txt, border=1, align="L")
     left_end_y = pdf.get_y()
 
-    pdf.set_xy(x + left_w, y)
-    pdf.multi_cell(right_w, 5, right_txt, border=1, align="L")
+    # Right cell
+    pdf.set_xy(x0 + left_w, y0)
+    pdf.multi_cell(right_w, line_h, right_txt, border=1, align="L")
     right_end_y = pdf.get_y()
 
-    pdf.set_xy(x, max(left_end_y, right_end_y))
+    pdf.set_xy(x0, max(left_end_y, right_end_y))
 
 
 def pdf_table_row(pdf: FPDF, widths: List[float], cells: List[str], bold: bool = False, align: str = "L") -> None:
     pdf.set_font("helvetica", "B" if bold else "", 9)
 
     cleaned_cells = [safe_text(c or "-") for c in cells]
+    line_h = 5
 
-    line_heights = []
-    for txt, w in zip(cleaned_cells, widths):
-        approx_chars = max(10, int(w / 2.4))
-        line_count = max(1, len(txt) // approx_chars + 1)
-        line_heights.append(line_count)
+    line_counts = [estimate_lines(txt, w) for txt, w in zip(cleaned_cells, widths)]
+    row_h = max(max(line_counts) * line_h, 8)
 
-    row_h = max(7, max(line_heights) * 5)
     pdf_ensure_space(pdf, row_h + 1)
 
     x0 = pdf.get_x()
     y0 = pdf.get_y()
-    current_x = x0
     max_y = y0
+    current_x = x0
 
     for txt, w in zip(cleaned_cells, widths):
         pdf.set_xy(current_x, y0)
-        pdf.multi_cell(w, 5, txt, border=1, align=align)
+        pdf.multi_cell(w, line_h, txt, border=1, align=align)
         max_y = max(max_y, pdf.get_y())
         current_x += w
 
@@ -846,7 +849,7 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
         txt = safe_text(v)
         return txt if txt else fallback
 
-    def truncate_text(v, max_len=110):
+    def truncate_text(v, max_len=100):
         txt = clean_display(v, "")
         if len(txt) <= max_len:
             return txt
@@ -906,8 +909,8 @@ def make_pdf_for_result(record_id: str, name: str, city: str, country: str, resu
     ]
 
     for row in rows:
-        row[1] = truncate_text(row[1], 95)
-        row[5] = truncate_text(row[5], 40)
+        row[1] = truncate_text(row[1], 90)
+        row[5] = truncate_text(row[5], 35)
         pdf_table_row(pdf, [col1, col2, col3, col4, col5, col6], row, align="L")
 
     pdf_section_title(pdf, "Social Checklist")
