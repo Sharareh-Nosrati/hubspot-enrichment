@@ -24,7 +24,7 @@ OBJECT_TYPE = "contacts"
 PROP_CITY = "city"
 PROP_COUNTRY = "country"
 
-POLL_LIMIT = int(os.getenv("HUBSPOT_BATCH_LIMIT", "2"))
+POLL_LIMIT = int(os.getenv("HUBSPOT_BATCH_LIMIT", "3"))
 SLEEP_BETWEEN_RECORDS = float(os.getenv("REQUEST_DELAY", "1"))
 
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "")
