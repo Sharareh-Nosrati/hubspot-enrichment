@@ -242,6 +242,9 @@ class ResolveResult:
 
     is_restaurant_match: bool = False
     non_restaurant_reason: str = ""
+    restaurant_match_score: float = 0.0
+    restaurant_match_percent: int = 0
+    restaurant_match_label: str = "No"
     tiktok_present: bool = False
 
 
@@ -1347,7 +1350,7 @@ def website_validation_details(name: str, city: str, website_url: str) -> Dict[s
     result["conflicting_city"] = conflict_city
     result["conflicting_city_mentions"] = conflict_mentions
 
-    result["is_valid"] = result["score"] >= 0.70
+    result["is_valid"] = ok
     return result
 
 
@@ -2937,6 +2940,128 @@ def find_working_domain(name: str, city: str, country: str) -> Tuple[Optional[st
 # -----------------------------
 # Entity validation
 # -----------------------------
+
+def compute_restaurant_match_score(
+    name: str,
+    city: str,
+    website: Optional[str],
+    instagram: Optional[str],
+    facebook: Optional[str],
+    tiktok: Optional[str] = None,
+    x: Optional[str] = None,
+) -> Tuple[float, str]:
+    score = 0.0
+    reasons: List[str] = []
+
+    restaurant_keywords = [
+        "restaurant", "ristorante", "pizzeria", "trattoria", "osteria",
+        "cucina", "menu", "menù", "prenota", "reservation", "booking",
+        "food", "delivery", "takeaway", "asporto", "bar", "cafe", "pub",
+        "pizza", "pasta", "wine", "vino", "chef", "dolci", "dessert"
+    ]
+
+    negative_keywords = [
+        "makeup", "hair stylist", "nails", "photographer", "blogger",
+        "fashion", "real estate", "lawyer", "fitness", "gym", "dentist",
+        "clinic", "beauty", "cosmetics", "wedding planner"
+    ]
+
+    if website:
+        html = fetch_url(website)
+        time.sleep(0.3)
+
+        if html:
+            soup = BeautifulSoup(html, "lxml")
+            text = soup.get_text(" ", strip=True).lower()
+            title = soup.title.get_text(" ", strip=True).lower() if soup.title else ""
+            combined = f"{title} {text}"
+
+            positive_hits = sum(1 for k in restaurant_keywords if k in combined)
+            negative_hits = sum(1 for k in negative_keywords if k in combined)
+
+            if positive_hits >= 3:
+                score += 0.35
+                reasons.append("Website contains strong restaurant keywords")
+            elif positive_hits >= 1:
+                score += 0.20
+                reasons.append("Website contains some restaurant keywords")
+
+            if "menu" in combined or "menù" in combined:
+                score += 0.15
+                reasons.append("Website mentions menu")
+
+            if any(k in combined for k in ["prenota", "reservation", "booking", "book a table"]):
+                score += 0.10
+                reasons.append("Website mentions booking")
+
+            if any(k in combined for k in ["delivery", "takeaway", "asporto", "a domicilio"]):
+                score += 0.10
+                reasons.append("Website mentions delivery/takeaway")
+
+            if negative_hits >= 2:
+                score -= 0.30
+                reasons.append("Website contains non-restaurant business signals")
+
+    if instagram:
+        html = fetch_url(instagram)
+        time.sleep(0.2)
+
+        if html:
+            text = extract_visible_text_from_html(html).lower()
+            positive_hits = sum(1 for k in restaurant_keywords if k in text)
+            negative_hits = sum(1 for k in negative_keywords if k in text)
+
+            if positive_hits >= 2:
+                score += 0.15
+                reasons.append("Instagram contains restaurant-related terms")
+
+            if looks_like_address_text(text):
+                score += 0.05
+                reasons.append("Instagram bio looks like business address")
+
+            if negative_hits >= 2:
+                score -= 0.15
+                reasons.append("Instagram looks like non-restaurant profile")
+
+    if facebook:
+        html = fetch_url(facebook)
+        time.sleep(0.2)
+
+        if html:
+            text = extract_visible_text_from_html(html).lower()
+            positive_hits = sum(1 for k in restaurant_keywords if k in text)
+            negative_hits = sum(1 for k in negative_keywords if k in text)
+
+            if positive_hits >= 2:
+                score += 0.15
+                reasons.append("Facebook contains restaurant-related terms")
+
+            if any(k in text for k in ["orari", "hours", "open now", "oggi aperto"]):
+                score += 0.05
+                reasons.append("Facebook has business opening hours")
+
+            if negative_hits >= 2:
+                score -= 0.15
+                reasons.append("Facebook looks like non-restaurant page")
+
+    if tiktok:
+        score += 0.03
+        reasons.append("TikTok profile exists")
+
+    if x:
+        score += 0.02
+        reasons.append("X profile exists")
+
+    name_n = normalize_for_match(name)
+    if any(w in name_n for w in ["ristorante", "pizzeria", "trattoria", "osteria", "pub", "bar"]):
+        score += 0.15
+        reasons.append("Business name contains restaurant-related word")
+
+    score = max(0.0, min(score, 1.0))
+    return score, " | ".join(dict.fromkeys(reasons))
+
+
+
 def validate_restaurant_match(
     name: str,
     city: str,
@@ -3686,13 +3811,43 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
             f"website_completeness_score={res.website_completeness_score}"
         )
 
-    res.is_restaurant_match, res.non_restaurant_reason = validate_restaurant_match(
+    _, legacy_restaurant_reason = validate_restaurant_match(
         name=name,
         city=city,
         website=res.website,
         instagram=res.instagram,
         facebook=res.facebook,
         x=res.x,
+    )
+
+    res.restaurant_match_score, restaurant_score_reason = compute_restaurant_match_score(
+        name=name,
+        city=city,
+        website=res.website,
+        instagram=res.instagram,
+        facebook=res.facebook,
+        tiktok=res.tiktok,
+        x=res.x,
+    )
+
+    res.restaurant_match_percent = int(round(res.restaurant_match_score * 100))
+
+    if res.restaurant_match_score >= 0.75:
+        res.restaurant_match_label = "Yes"
+        res.is_restaurant_match = True
+    elif res.restaurant_match_score >= 0.50:
+        res.restaurant_match_label = "Unclear"
+        res.is_restaurant_match = False
+    else:
+        res.restaurant_match_label = "No"
+        res.is_restaurant_match = False
+
+    res.non_restaurant_reason = restaurant_score_reason or legacy_restaurant_reason
+
+    evidence.append(
+        f"Restaurant score: label={res.restaurant_match_label}, "
+        f"score={res.restaurant_match_percent}%, "
+        f"reason={restaurant_score_reason}"
     )
 
     if not res.is_restaurant_match:
