@@ -3702,22 +3702,7 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
             res.source = "osm+site"
             res.confidence = min(1.0, res.confidence + 0.10)
 
-    if not res.website:
-        guessed_website, ev = find_working_domain(primary_search_name, city, country)
-        evidence += ev
 
-        if guessed_website:
-            res.website = guessed_website
-            res.website_score = max(res.website_score, 0.70)
-            res.website_match_reason = "Guessed domain matched restaurant name/city"
-            res.website_found_from = "guessed_domain"
-            res.source = "guessed_domain"
-            res.confidence = max(res.confidence, 0.50)
-
-            apply_website_validation(res, name, city, evidence)
-
-            if res.website and res.website_validated:
-                enrich_from_valid_website(res, evidence, "guessed_website_html")
 
     if (not res.website) or (not res.instagram) or (not res.facebook) or (not res.tiktok):
         profiles, ev, providers_tried = find_profiles_via_search_router(primary_search_name, city, country)
@@ -3934,6 +3919,36 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
                 res.confidence = max(res.confidence, 0.74)
 
                 enrich_from_valid_website(res, evidence, "dedicated_website_html")
+                
+        # ---------------------------------------
+        # LAST PRIORITY: Guess domain
+        # ---------------------------------------
+    if not res.website:
+        guessed_website, ev = find_working_domain(primary_search_name, city, country)
+        evidence += ev
+
+        if guessed_website:
+            temp_result = ResolveResult(name=name, city=city, country=country)
+            temp_result.website = guessed_website
+
+            apply_website_validation(temp_result, name, city, evidence)
+
+            if temp_result.website_validated:
+                res.website = guessed_website
+                res.website_score = max(res.website_score, 0.60)
+                res.website_match_reason = "Guessed domain (fallback after router)"
+                res.website_found_from = "guessed_domain"
+
+                if res.source == "none":
+                    res.source = "guessed_domain"
+
+                res.confidence = max(res.confidence, 0.55)
+
+                evidence.append(f"Accepted guessed domain (fallback): {guessed_website}")
+
+                enrich_from_valid_website(res, evidence, "guessed_website_html")
+            else:
+                evidence.append(f"Rejected guessed domain (failed validation): {guessed_website}")
 
     if res.uqrto:
         resolved_uqrto = resolve_redirect_url(res.uqrto)
