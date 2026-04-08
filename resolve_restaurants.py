@@ -284,6 +284,83 @@ def norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
+def extract_google_maps_from_text(text: str) -> List[str]:
+    import re
+    patterns = [
+        r"https?://www\.google\.com/maps[^\s\"']+",
+        r"https?://maps\.google\.com[^\s\"']+",
+        r"https?://goo\.gl/maps[^\s\"']+",
+    ]
+    links = []
+    for p in patterns:
+        links.extend(re.findall(p, text))
+    return list(dict.fromkeys(links))
+
+
+def extract_possible_addresses(text: str) -> List[str]:
+    candidates = []
+    lines = text.split("\n")
+
+    for line in lines:
+        l = line.strip()
+        if len(l) < 10:
+            continue
+
+        if any(x in l.lower() for x in ["via", "viale", "piazza", "street", "road"]):
+            candidates.append(l)
+
+    return candidates[:3]
+
+
+def search_google_maps_by_address(router, name: str, address: str, city: str):
+    query = f"{name} {address} {city} google maps"
+    resp = router.search(query)
+
+    for r in resp.results:
+        if "google.com/maps" in r.url:
+            return r.url
+
+    return None
+
+
+def resolve_google_maps(
+    name: str,
+    city: str,
+    router,
+    website_html: Optional[str],
+    instagram_html: Optional[str],
+    facebook_html: Optional[str],
+) -> Tuple[Optional[str], str]:
+
+    # 1. Direct extraction
+    for source_name, html in [
+        ("website", website_html),
+        ("instagram", instagram_html),
+        ("facebook", facebook_html),
+    ]:
+        if html:
+            links = extract_google_maps_from_text(html)
+            if links:
+                return links[0], f"found in {source_name}"
+
+    # 2. Address-based search
+    if website_html:
+        addresses = extract_possible_addresses(website_html)
+        for addr in addresses:
+            gmaps = search_google_maps_by_address(router, name, addr, city)
+            if gmaps:
+                return gmaps, "resolved via address"
+
+    # 3. Router fallback
+    query = f"{name} {city} google maps"
+    resp = router.search(query)
+
+    for r in resp.results:
+        if "google.com/maps" in r.url:
+            return r.url, "resolved via router search"
+
+    return None, "not found"
+
 
 
 def looks_like_address_text(text: str) -> bool:
@@ -3550,6 +3627,13 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
     res = ResolveResult(name=name, city=city, country=country)
     evidence: List[str] = []
 
+    # NEW: router instance for smarter Google Maps resolution
+    try:
+        router = build_router()
+    except Exception as e:
+        router = None
+        evidence.append(f"Router init failed inside resolve_one: {e}")
+
     search_names = extract_candidate_business_names(name, city)
     restaurant_priority_words = ["ristorante", "pizzeria", "osteria", "trattoria", "bar", "cafe", "pub"]
     primary_search_name = search_names[0] if search_names else name
@@ -3603,6 +3687,7 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
                 if cleaned:
                     res.google_maps_url = cleaned
                     res.directory_links_json = append_unique_json_list(res.directory_links_json, [cleaned])
+                    evidence.append(f"Google Maps found in OSM tags: {cleaned}")
 
             res.confidence = max(res.confidence, score)
             res.source = "osm"
@@ -3696,8 +3781,7 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
 
         if any([profiles.get("instagram"), profiles.get("facebook"), profiles.get("tiktok")]):
             res.confidence = max(res.confidence, 0.72)
-            
-    
+
     if not res.google_maps_url or not res.tripadvisor_url or not res.thefork_url:
         directory_candidates, ev, providers_tried = find_directory_platforms_via_search_router(primary_search_name, city, country)
         evidence += ev
@@ -3709,7 +3793,7 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
                 [c.url for c in directory_candidates]
             )
             evidence.append(f"Stored {len(directory_candidates)} dedicated directory links")
-            
+
     if not res.instagram:
         instagram_candidate, ev, providers_tried = find_instagram_via_search_router(primary_search_name, city, country)
         evidence += ev
@@ -3744,7 +3828,7 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
         if ig_primary_link and is_valid_external_link(ig_primary_link):
             res.instagram_primary_external_link = ig_primary_link
             evidence.append(f"Instagram primary external link found: {ig_primary_link}")
-        
+
         ig_profile_signals = analyze_instagram_profile_signals(res.instagram)
         res.ig_website_link_present = ig_profile_signals["ig_website_link_present"]
         res.ig_description_present = ig_profile_signals["ig_description_present"]
@@ -3790,7 +3874,7 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
         if fb_primary_link and is_valid_external_link(fb_primary_link):
             res.facebook_primary_external_link = fb_primary_link
             evidence.append(f"Facebook primary external link found: {fb_primary_link}")
-        
+
         fb_profile_signals = analyze_facebook_profile_signals(res.facebook)
         res.fb_website_link_present = fb_profile_signals["fb_website_link_present"]
         res.fb_description_present = fb_profile_signals["fb_description_present"]
@@ -3864,15 +3948,51 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
             evidence=evidence,
         )
 
+    # NEW SMART GOOGLE MAPS RESOLUTION
+    # Replaces the old "if not res.google_maps_url: find_google_maps_via_search_router(...)"
     if not res.google_maps_url:
-        google_maps_candidate, ev, providers_tried = find_google_maps_via_search_router(primary_search_name, city, country)
-        evidence += ev
-        evidence.append(f"Providers tried for Google Maps search: {providers_tried}")
+        website_html_for_gmaps = None
+        instagram_html_for_gmaps = None
+        facebook_html_for_gmaps = None
 
-        if google_maps_candidate:
-            res.google_maps_url = ensure_http(google_maps_candidate.url)
-            res.directory_links_json = append_unique_json_list(res.directory_links_json, [res.google_maps_url])
-            evidence.append(f"Google Maps found via dedicated search (score={google_maps_candidate.score:.3f})")
+        if res.website:
+            website_html_for_gmaps = fetch_url(res.website)
+            if website_html_for_gmaps:
+                evidence.append("Fetched website HTML for Google Maps resolution")
+
+        if res.instagram:
+            instagram_html_for_gmaps = fetch_url(res.instagram)
+            if instagram_html_for_gmaps:
+                evidence.append("Fetched Instagram HTML for Google Maps resolution")
+
+        if res.facebook:
+            facebook_html_for_gmaps = fetch_url(res.facebook)
+            if facebook_html_for_gmaps:
+                evidence.append("Fetched Facebook HTML for Google Maps resolution")
+
+        if router:
+            gmaps_url, gmaps_reason = resolve_google_maps(
+                name=name,
+                city=city,
+                router=router,
+                website_html=website_html_for_gmaps,
+                instagram_html=instagram_html_for_gmaps,
+                facebook_html=facebook_html_for_gmaps,
+            )
+
+            if gmaps_url:
+                cleaned_gmaps = clean_google_maps_url(gmaps_url)
+                if cleaned_gmaps:
+                    res.google_maps_url = cleaned_gmaps
+                    res.directory_links_json = append_unique_json_list(
+                        res.directory_links_json,
+                        [cleaned_gmaps]
+                    )
+                    evidence.append(f"Google Maps resolved smartly: {cleaned_gmaps} ({gmaps_reason})")
+            else:
+                evidence.append(f"Google Maps smart resolution failed: {gmaps_reason}")
+        else:
+            evidence.append("Google Maps smart resolution skipped because router is unavailable")
 
     try_upgrade_website_from_candidates(res, name, city, evidence)
 
@@ -3959,7 +4079,7 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
         f"score={res.restaurant_match_percent}%, "
         f"reason={restaurant_score_reason}"
     )
-    
+
     social_kpis = analyze_basic_social_kpis(res)
 
     res.has_facebook_page = social_kpis["has_facebook_page"]
@@ -3979,8 +4099,6 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
         f"social_identity_signal_score={int(round(res.social_identity_signal_score * 100))}%, "
         f"reason={social_kpis['social_kpi_reason']}"
     )
-    
-    
 
     if not res.is_restaurant_match:
         evidence.append(f"Non-restaurant or weak entity match: {res.non_restaurant_reason}")
