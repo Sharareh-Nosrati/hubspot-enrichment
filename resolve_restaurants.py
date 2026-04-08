@@ -374,6 +374,11 @@ def analyze_facebook_profile_signals(facebook_url: str) -> Dict[str, Any]:
 def normalize_for_match(s: str) -> str:
     s = (s or "").lower().strip()
     s = s.replace("&", " and ")
+
+    # important city normalization
+    s = s.replace("porto venere", "portovenere")
+    s = s.replace("porto-venere", "portovenere")
+
     s = re.sub(r"[^\w\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
@@ -553,7 +558,82 @@ def clean_input_name(raw_name: str) -> str:
     return name
 
 
-def extract_candidate_business_names(raw_name: str) -> List[str]:
+
+
+def dedupe_preserve_order(values: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for v in values:
+        key = normalize_for_match(v)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(v)
+    return out
+
+
+def strip_city_from_name(raw_name: str, city: str) -> str:
+    name = clean_input_name(raw_name)
+    if not name:
+        return ""
+
+    for cv in city_variants(city):
+        # remove "... Portovenere" at end
+        pattern_end = rf"(\s+|\s*-\s*)(?:{re.escape(cv)})$"
+        name = re.sub(pattern_end, "", name, flags=re.IGNORECASE).strip()
+
+        # remove "a Portovenere", "in Portovenere", "di Portovenere"
+        pattern_with_prep = rf"\b(?:a|in|di)\s+{re.escape(cv)}\b"
+        name = re.sub(pattern_with_prep, "", name, flags=re.IGNORECASE).strip()
+
+    name = re.sub(r"\s+", " ", name).strip(" -")
+    return name
+
+
+def split_name_on_separators(name: str) -> List[str]:
+    parts = re.split(r"\s+-\s+|\s+\|\s+|/|,|\(|\)", name)
+    out = []
+    for p in parts:
+        p = re.sub(r"\s+", " ", p).strip(" -")
+        if p:
+            out.append(p)
+    return out
+
+
+def build_search_name_set(raw_name: str, city: str) -> List[str]:
+    names = extract_candidate_business_names(raw_name, city)
+    extras: List[str] = []
+
+    for n in names:
+        n_clean = strip_city_from_name(n, city)
+        if n_clean:
+            extras.append(n_clean)
+
+        if " - " in n:
+            extras.extend([p for p in split_name_on_separators(n) if p])
+
+    all_names = dedupe_preserve_order(names + extras)
+
+    scored = []
+    for n in all_names:
+        tokens = tokenize_name(n)
+        score = len(tokens)
+        n_norm = normalize_for_match(n)
+
+        if any(w in n_norm for w in ["ristorante", "pizzeria", "osteria", "trattoria"]):
+            score += 2
+        if n_norm == "il timone":
+            score += 3
+
+        scored.append((score, n))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [n for _, n in scored]
+
+
+
+
+def extract_candidate_business_names(raw_name: str, city: str = "") -> List[str]:
     raw = clean_input_name(raw_name)
     if not raw:
         return []
@@ -562,12 +642,22 @@ def extract_candidate_business_names(raw_name: str) -> List[str]:
     seen = set()
 
     def add_candidate(value: str):
-        value = re.sub(r"\s+", " ", (value or "")).strip()
-        if value and value.lower() not in seen:
-            seen.add(value.lower())
+        value = re.sub(r"\s+", " ", (value or "")).strip(" -")
+        key = normalize_for_match(value)
+        if value and key and key not in seen:
+            seen.add(key)
             candidates.append(value)
 
+    city_cleaned = strip_city_from_name(raw, city) if city else raw
+
     add_candidate(raw)
+    add_candidate(city_cleaned)
+
+    for part in split_name_on_separators(raw):
+        add_candidate(part)
+
+    for part in split_name_on_separators(city_cleaned):
+        add_candidate(part)
 
     restaurant_words = ["ristorante", "pizzeria", "osteria", "trattoria", "bar", "cafe", "pub"]
     raw_lower = raw.lower()
@@ -576,13 +666,18 @@ def extract_candidate_business_names(raw_name: str) -> List[str]:
         idx = raw_lower.find(word)
         if idx != -1:
             add_candidate(raw[idx:])
+            add_candidate(strip_city_from_name(raw[idx:], city))
 
-    words = raw.split()
-    for n in [2, 3, 4]:
+    words = city_cleaned.split()
+    for n in [1, 2, 3, 4]:
         if len(words) >= n:
             add_candidate(" ".join(words[:n]))
 
-    add_candidate(raw.replace(" ", ""))
+    raw_n = normalize_for_match(city_cleaned)
+    if " il timone " in f" {raw_n} " or raw_n.startswith("il timone") or raw_n.endswith("il timone"):
+        add_candidate("Il Timone")
+
+    add_candidate(city_cleaned.replace(" ", ""))
     return candidates
 
 
@@ -723,6 +818,8 @@ def city_variants(city: str) -> List[str]:
         "turin": {"torino"},
         "genova": {"genoa"},
         "genoa": {"genova"},
+        "portovenere": {"porto venere", "porto-venere"},
+        "porto venere": {"portovenere", "porto-venere"},
     }
 
     if c in aliases:
@@ -1186,12 +1283,12 @@ def validate_business_page_content(
         reasons.append(f"page strongly points to another city: {conflict_city} ({conflict_mentions} mentions)")
 
     # hard rejections
-    if token_ratio < 0.5 and not exact_combined and fuzzy_best < 0.72:
-        score = min(score, 0.44)
+    if token_ratio < 0.45 and not exact_combined and fuzzy_best < 0.70:
+        score = min(score, 0.48)
         reasons.append("name match too weak")
 
     if restaurant_group_count < 2 and restaurant_signal_count < 5:
-        score = min(score, 0.49)
+        score = min(score, 0.52)
         reasons.append("restaurant evidence too weak")
 
     if has_conflict and target_city_mentions == 0:
@@ -1199,8 +1296,8 @@ def validate_business_page_content(
 
     score = max(0.0, min(score, 1.0))
     final_ok = (
-        score >= 0.72
-        and (exact_combined or token_ratio >= 0.6 or fuzzy_best >= 0.80)
+        score >= 0.68
+        and (exact_combined or token_ratio >= 0.55 or fuzzy_best >= 0.78 or is_strong_official_domain(name, url))
         and (restaurant_group_count >= 2 or restaurant_signal_count >= 6)
     )
 
@@ -1985,11 +2082,19 @@ def find_profiles_via_search_router(
     best_uqrto = None
     all_directory_candidates: List[LinkCandidate] = []
 
-    queries = [
-        f"{name} {city} restaurant ristorante pizzeria official website facebook instagram tiktok google maps",
-        f'"{name}" "{city}" official website instagram facebook google maps',
-        f"{name} {city} menu prenota delivery instagram facebook maps",
-    ]
+    search_names = build_search_name_set(name, city)[:6]
+
+    queries = []
+    for n in search_names:
+        queries.extend([
+            f"{n} {city} restaurant ristorante pizzeria official website facebook instagram tiktok google maps",
+            f'"{n}" "{city}" official website instagram facebook google maps',
+            f"{n} {city} menu prenota delivery instagram facebook maps",
+            f'"{n}" "{city}" tripadvisor',
+            f'"{n}" "{city}" thefork',
+        ])
+
+    queries = dedupe_preserve_order(queries)
 
     for provider_name in provider_order:
         providers_tried.append(provider_name)
@@ -2007,24 +2112,25 @@ def find_profiles_via_search_router(
                 evidence.append(f"Provider {provider_name} failed for '{query}': {response.error_message}")
                 continue
 
-            candidates = extract_business_profile_candidates_from_results(
-                response.results,
-                name=name,
-                city=city,
-                provider_name=provider_name,
-            )
+            for n in search_names[:4]:
+                candidates = extract_business_profile_candidates_from_results(
+                    response.results,
+                    name=n,
+                    city=city,
+                    provider_name=provider_name,
+                )
 
-            all_directory_candidates.extend(candidates.get("directory", []))
+                all_directory_candidates.extend(candidates.get("directory", []))
 
-            best_website = keep_best_candidate(best_website, choose_best_candidate(candidates["website"], 0.42))
-            best_facebook = keep_best_candidate(best_facebook, choose_best_candidate(candidates["facebook"], 0.30))
-            best_instagram = keep_best_candidate(best_instagram, choose_best_candidate(candidates["instagram"], 0.25))
-            best_tiktok = keep_best_candidate(best_tiktok, choose_best_candidate(candidates["tiktok"], 0.30))
-            best_threads = keep_best_candidate(best_threads, choose_best_candidate(candidates["threads"], 0.25))
-            best_x = keep_best_candidate(best_x, choose_best_candidate(candidates["x"], 0.25))
-            best_youtube = keep_best_candidate(best_youtube, choose_best_candidate(candidates["youtube"], 0.25))
-            best_linktree = keep_best_candidate(best_linktree, choose_best_candidate(candidates["linktree"], 0.20))
-            best_uqrto = keep_best_candidate(best_uqrto, choose_best_candidate(candidates["uqrto"], 0.20))
+                best_website = keep_best_candidate(best_website, choose_best_candidate(candidates["website"], 0.38))
+                best_facebook = keep_best_candidate(best_facebook, choose_best_candidate(candidates["facebook"], 0.28))
+                best_instagram = keep_best_candidate(best_instagram, choose_best_candidate(candidates["instagram"], 0.24))
+                best_tiktok = keep_best_candidate(best_tiktok, choose_best_candidate(candidates["tiktok"], 0.28))
+                best_threads = keep_best_candidate(best_threads, choose_best_candidate(candidates["threads"], 0.25))
+                best_x = keep_best_candidate(best_x, choose_best_candidate(candidates["x"], 0.25))
+                best_youtube = keep_best_candidate(best_youtube, choose_best_candidate(candidates["youtube"], 0.25))
+                best_linktree = keep_best_candidate(best_linktree, choose_best_candidate(candidates["linktree"], 0.20))
+                best_uqrto = keep_best_candidate(best_uqrto, choose_best_candidate(candidates["uqrto"], 0.20))
 
         evidence.append(
             f"Provider {provider_name} cumulative best: "
@@ -2074,13 +2180,19 @@ def find_google_maps_via_search_router(
     except Exception as e:
         return None, [f"Router init failed for Google Maps search: {e}"], providers_tried
 
-    queries = [
-        f"{name} {city} google maps",
-        f"{name} {city} maps",
-        f'"{name}" "{city}" "google maps"',
-        f'"{name}" "{city}" "share.google"',
-        f'"{name}" "{city}" "maps.app.goo.gl"',
-    ]
+    search_names = build_search_name_set(name, city)[:6]
+
+    queries = []
+    for n in search_names:
+        queries.extend([
+            f"{n} {city} google maps",
+            f"{n} {city} maps",
+            f'"{n}" "{city}" "google maps"',
+            f'"{n}" "{city}" "share.google"',
+            f'"{n}" "{city}" "maps.app.goo.gl"',
+        ])
+
+    queries = dedupe_preserve_order(queries)
     provider_order = ["serpapi", "serper", "tavily"]
     best_candidate = None
 
@@ -2111,22 +2223,28 @@ def find_google_maps_via_search_router(
                 if not cleaned_gmaps:
                     continue
 
-                score = score_text_candidate(name, city, title, snippet, url)
-                if "share.google" in cleaned_gmaps.lower() or "maps.app.goo.gl" in cleaned_gmaps.lower():
-                    score += 0.08
-                if "maps" in title.lower():
-                    score += 0.05
+                best_score = 0.0
+                best_name = ""
+                for n in search_names[:4]:
+                    score = score_text_candidate(n, city, title, snippet, url)
+                    if "share.google" in cleaned_gmaps.lower() or "maps.app.goo.gl" in cleaned_gmaps.lower():
+                        score += 0.08
+                    if "maps" in title.lower():
+                        score += 0.05
+                    if score > best_score:
+                        best_score = score
+                        best_name = n
 
                 candidates.append(
                     LinkCandidate(
                         url=cleaned_gmaps,
-                        score=min(1.0, score + 0.15),
+                        score=min(1.0, best_score + 0.15),
                         source=f"search_router_google_maps:{provider_name}",
-                        reason=f"Google Maps query='{query}' via {provider_name}, title='{title}'",
+                        reason=f"Google Maps query='{query}' via {provider_name}, matched_name='{best_name}', title='{title}'",
                     )
                 )
 
-            provider_best = choose_best_candidate(candidates, min_score=0.35)
+            provider_best = choose_best_candidate(candidates, min_score=0.30)
             best_candidate = keep_best_candidate(best_candidate, provider_best)
 
         evidence.append(
@@ -2134,7 +2252,6 @@ def find_google_maps_via_search_router(
         )
 
     return best_candidate, evidence, providers_tried
-
 
 def find_website_via_search_router(
     name: str,
@@ -2149,13 +2266,20 @@ def find_website_via_search_router(
     except Exception as e:
         return None, [f"Router init failed for website search: {e}"], providers_tried
 
-    queries = [
-        f"{name} {city} official website",
-        f"{name} {city} ristorante official website",
-        f"{name} {city} pizzeria official website",
-        f'"{name}" "{city}" official website',
-        f'"{name}" "{city}" sito ufficiale',
-    ]
+    search_names = build_search_name_set(name, city)[:6]
+
+    queries = []
+    for n in search_names:
+        queries.extend([
+            f"{n} {city} official website",
+            f"{n} {city} ristorante official website",
+            f"{n} {city} pizzeria official website",
+            f'"{n}" "{city}" official website',
+            f'"{n}" "{city}" sito ufficiale',
+            f'"{n}" "{city}" menu',
+        ])
+
+    queries = dedupe_preserve_order(queries)
     provider_order = ["serpapi", "serper", "tavily"]
     best_candidate = None
 
@@ -2182,17 +2306,24 @@ def find_website_via_search_router(
                 if not domain or is_non_official_website_domain(domain) or is_directory_domain(domain):
                     continue
 
-                score = score_text_candidate(name, city, getattr(r, "title", ""), getattr(r, "snippet", ""), url)
+                best_score = 0.0
+                best_name = ""
+                for n in search_names[:4]:
+                    score = score_text_candidate(n, city, getattr(r, "title", ""), getattr(r, "snippet", ""), url)
+                    if score > best_score:
+                        best_score = score
+                        best_name = n
+
                 candidates.append(
                     LinkCandidate(
                         url=url,
-                        score=score,
+                        score=best_score,
                         source=f"search_router_website:{provider_name}",
-                        reason=f"Website query='{query}' via {provider_name}, title='{getattr(r, 'title', '')}'",
+                        reason=f"Website query='{query}' via {provider_name}, matched_name='{best_name}', title='{getattr(r, 'title', '')}'",
                     )
                 )
 
-            provider_best = choose_best_candidate(candidates, min_score=0.45)
+            provider_best = choose_best_candidate(candidates, min_score=0.38)
             best_candidate = keep_best_candidate(best_candidate, provider_best)
 
         evidence.append(
@@ -2200,6 +2331,55 @@ def find_website_via_search_router(
         )
 
     return best_candidate, evidence, providers_tried
+
+
+def find_directory_platforms_via_search_router(
+    name: str,
+    city: str,
+    country: str,
+) -> Tuple[List[LinkCandidate], List[str], List[str]]:
+    evidence: List[str] = []
+    providers_tried: List[str] = []
+
+    try:
+        router = build_router()
+    except Exception as e:
+        return [], [f"Router init failed for directory search: {e}"], providers_tried
+
+    search_names = build_search_name_set(name, city)[:6]
+    provider_order = ["serpapi", "serper", "tavily"]
+    directories = ["tripadvisor", "thefork", "restaurantguru", "google maps"]
+
+    all_candidates: List[LinkCandidate] = []
+
+    for provider_name in provider_order:
+        providers_tried.append(provider_name)
+
+        for n in search_names:
+            for d in directories:
+                query = f'"{n}" "{city}" "{d}"'
+                response = router.search(
+                    query,
+                    country="IT",
+                    language="it",
+                    count=10,
+                    providers_order=[provider_name],
+                )
+
+                if not response.ok:
+                    evidence.append(f"Directory {provider_name} failed for '{query}': {response.error_message}")
+                    continue
+
+                candidates = extract_business_profile_candidates_from_results(
+                    response.results,
+                    name=n,
+                    city=city,
+                    provider_name=provider_name,
+                )
+                all_candidates.extend(candidates.get("directory", []))
+
+    evidence.append(f"Dedicated directory search produced {len(all_candidates)} candidates")
+    return all_candidates, evidence, providers_tried
 
 
 def _find_single_social_via_search_router(
@@ -2217,11 +2397,17 @@ def _find_single_social_via_search_router(
     except Exception as e:
         return None, [f"Router init failed for {platform}: {e}"], providers_tried
 
-    queries = [
-        f"{name} {city} {platform}",
-        f"{name} {city} restaurant {platform}",
-        f'{name} "{city}" {platform}',
-    ]
+    search_names = build_search_name_set(name, city)[:6]
+
+    queries = []
+    for n in search_names:
+        queries.extend([
+            f"{n} {city} {platform}",
+            f"{n} {city} restaurant {platform}",
+            f'"{n}" "{city}" {platform}',
+        ])
+
+    queries = dedupe_preserve_order(queries)
     provider_order = ["serpapi", "serper", "tavily"]
     best_candidate = None
 
@@ -2266,13 +2452,20 @@ def _find_single_social_via_search_router(
                 if not cleaned:
                     continue
 
-                score = score_social_candidate(name, city, title, snippet, raw_url)
+                best_score = 0.0
+                best_name = ""
+                for n in search_names[:4]:
+                    score = score_social_candidate(n, city, title, snippet, raw_url)
+                    if score > best_score:
+                        best_score = score
+                        best_name = n
+
                 candidates.append(
                     LinkCandidate(
                         url=cleaned,
-                        score=score,
+                        score=best_score,
                         source=f"search_router_{platform}:{provider_name}",
-                        reason=f"{platform} query='{query}' via {provider_name}, title='{title}'",
+                        reason=f"{platform} query='{query}' via {provider_name}, matched_name='{best_name}', title='{title}'",
                     )
                 )
 
@@ -3122,7 +3315,7 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
     res = ResolveResult(name=name, city=city, country=country)
     evidence: List[str] = []
 
-    search_names = extract_candidate_business_names(name)
+    search_names = extract_candidate_business_names(name, city)
     restaurant_priority_words = ["ristorante", "pizzeria", "osteria", "trattoria", "bar", "cafe", "pub"]
     primary_search_name = search_names[0] if search_names else name
 
@@ -3268,7 +3461,20 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
 
         if any([profiles.get("instagram"), profiles.get("facebook"), profiles.get("tiktok")]):
             res.confidence = max(res.confidence, 0.72)
+            
+    
+    if not res.google_maps_url or not res.tripadvisor_url or not res.thefork_url:
+        directory_candidates, ev, providers_tried = find_directory_platforms_via_search_router(primary_search_name, city, country)
+        evidence += ev
+        evidence.append(f"Providers tried for dedicated directory search: {providers_tried}")
 
+        if directory_candidates:
+            res.directory_links_json = append_unique_json_list(
+                res.directory_links_json,
+                [c.url for c in directory_candidates]
+            )
+            evidence.append(f"Stored {len(directory_candidates)} dedicated directory links")
+            
     if not res.instagram:
         instagram_candidate, ev, providers_tried = find_instagram_via_search_router(primary_search_name, city, country)
         evidence += ev

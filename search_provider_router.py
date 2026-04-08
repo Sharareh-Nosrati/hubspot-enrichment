@@ -57,7 +57,7 @@ class SearchResponse:
 @dataclass
 class ProviderPolicy:
     min_results: int = 1
-    min_top_score: float = 0.35
+    min_top_score: float = 0.28
     timeout_sec: int = DEFAULT_TIMEOUT_SEC
 
 
