@@ -206,6 +206,13 @@ class ResolveResult:
     has_restaurantguru: bool = False
     has_opentable: bool = False
     has_quandoo: bool = False
+    has_facebook_page: bool = False
+    has_instagram_page: bool = False
+
+    social_content_quality_label: str = "unknown"
+    social_content_quality_score: float = 0.0
+    social_identity_signal_label: str = "unknown"
+    social_identity_signal_score: float = 0.0
     
     fb_website_link_present: bool = False
     fb_description_present: bool = False
@@ -3062,6 +3069,109 @@ def compute_restaurant_match_score(
 
 
 
+def analyze_basic_social_kpis(res: ResolveResult) -> Dict[str, Any]:
+    """
+    Builds easy social KPIs that do not require Meta API permissions.
+    Uses already-collected profile signals and visible-text heuristics only.
+    """
+    score = 0.0
+    reasons: List[str] = []
+
+    has_fb = bool(res.facebook)
+    has_ig = bool(res.instagram)
+
+    if has_fb:
+        score += 0.15
+        reasons.append("Facebook page found")
+
+    if has_ig:
+        score += 0.15
+        reasons.append("Instagram page found")
+
+    if res.fb_description_present:
+        score += 0.10
+        reasons.append("Facebook description present")
+
+    if res.fb_hours_present:
+        score += 0.08
+        reasons.append("Facebook hours present")
+
+    if res.fb_bio_website_link_present:
+        score += 0.08
+        reasons.append("Facebook bio website link present")
+
+    if res.fb_bio_instagram_link_present:
+        score += 0.05
+        reasons.append("Facebook links to Instagram")
+
+    if res.ig_description_present:
+        score += 0.10
+        reasons.append("Instagram description present")
+
+    if res.ig_website_link_present:
+        score += 0.08
+        reasons.append("Instagram website link present")
+
+    if res.ig_bio_address_present:
+        score += 0.08
+        reasons.append("Instagram bio address present")
+
+    if res.menu_present:
+        score += 0.07
+        reasons.append("Menu found")
+
+    if res.booking_present:
+        score += 0.03
+        reasons.append("Booking found")
+
+    if res.delivery_present:
+        score += 0.03
+        reasons.append("Delivery/takeaway found")
+
+    if res.unique_value_present:
+        score += 0.08
+        reasons.append("Identity/uniqueness visible")
+
+    score = max(0.0, min(score, 1.0))
+
+    if score >= 0.70:
+        content_quality_label = "good"
+    elif score >= 0.40:
+        content_quality_label = "basic"
+    else:
+        content_quality_label = "weak"
+
+    identity_score = 0.0
+    if res.unique_value_present:
+        identity_score += 0.45
+    if res.menu_present:
+        identity_score += 0.20
+    if res.ig_description_present or res.fb_description_present:
+        identity_score += 0.20
+    if res.website and res.website_validated:
+        identity_score += 0.15
+
+    identity_score = max(0.0, min(identity_score, 1.0))
+
+    if identity_score >= 0.70:
+        identity_label = "strong"
+    elif identity_score >= 0.40:
+        identity_label = "basic"
+    else:
+        identity_label = "weak"
+
+    return {
+        "has_facebook_page": has_fb,
+        "has_instagram_page": has_ig,
+        "social_content_quality_score": round(score, 3),
+        "social_content_quality_label": content_quality_label,
+        "social_identity_signal_score": round(identity_score, 3),
+        "social_identity_signal_label": identity_label,
+        "social_kpi_reason": " | ".join(dict.fromkeys(reasons)),
+    }
+
+
+
 def validate_restaurant_match(
     name: str,
     city: str,
@@ -3849,6 +3959,28 @@ def resolve_one(name: str, city: str, country: str) -> ResolveResult:
         f"score={res.restaurant_match_percent}%, "
         f"reason={restaurant_score_reason}"
     )
+    
+    social_kpis = analyze_basic_social_kpis(res)
+
+    res.has_facebook_page = social_kpis["has_facebook_page"]
+    res.has_instagram_page = social_kpis["has_instagram_page"]
+    res.social_content_quality_score = social_kpis["social_content_quality_score"]
+    res.social_content_quality_label = social_kpis["social_content_quality_label"]
+    res.social_identity_signal_score = social_kpis["social_identity_signal_score"]
+    res.social_identity_signal_label = social_kpis["social_identity_signal_label"]
+
+    evidence.append(
+        "Basic social KPIs: "
+        f"has_facebook_page={res.has_facebook_page}, "
+        f"has_instagram_page={res.has_instagram_page}, "
+        f"social_content_quality_label={res.social_content_quality_label}, "
+        f"social_content_quality_score={int(round(res.social_content_quality_score * 100))}%, "
+        f"social_identity_signal_label={res.social_identity_signal_label}, "
+        f"social_identity_signal_score={int(round(res.social_identity_signal_score * 100))}%, "
+        f"reason={social_kpis['social_kpi_reason']}"
+    )
+    
+    
 
     if not res.is_restaurant_match:
         evidence.append(f"Non-restaurant or weak entity match: {res.non_restaurant_reason}")
